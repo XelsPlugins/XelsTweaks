@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using XelsTweaks.Tweaks.Interface;
 using XelsTweaks.Tweaks.Utility;
 
 namespace XelsTweaks.Tweaks;
@@ -77,6 +78,21 @@ internal sealed class TweakManager : IDisposable
         this.Register(new AutoLoginTweak(
             this.services,
             this.config.GetOrCreateTweakState(AutoLoginTweak.TweakId),
+            this.saveConfig));
+
+        this.Register(new KeepTryOnOpenTweak(
+            this.services,
+            this.config.GetOrCreateTweakState(KeepTryOnOpenTweak.TweakId),
+            this.saveConfig));
+
+        this.Register(new GlamourOutfitCompactorTweak(
+            this.services,
+            this.config.GetOrCreateTweakState(GlamourOutfitCompactorTweak.TweakId),
+            this.saveConfig));
+
+        this.Register(new PartyListExamineTweak(
+            this.services,
+            this.config.GetOrCreateTweakState(PartyListExamineTweak.TweakId),
             this.saveConfig));
     }
 

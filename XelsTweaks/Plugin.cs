@@ -23,10 +23,16 @@ public sealed class Plugin : IDalamudPlugin
     [PluginService] private static IClientState ClientState { get; set; } = null!;
     [PluginService] private static ICondition Condition { get; set; } = null!;
     [PluginService] private static IObjectTable ObjectTable { get; set; } = null!;
+    [PluginService] private static IPartyList PartyList { get; set; } = null!;
     [PluginService] private static ITargetManager TargetManager { get; set; } = null!;
     [PluginService] private static IDataManager DataManager { get; set; } = null!;
     [PluginService] private static ITextureProvider TextureProvider { get; set; } = null!;
     [PluginService] private static IGameGui GameGui { get; set; } = null!;
+    [PluginService] private static IContextMenu ContextMenu { get; set; } = null!;
+    [PluginService] private static IAgentLifecycle AgentLifecycle { get; set; } = null!;
+    [PluginService] private static IAddonLifecycle AddonLifecycle { get; set; } = null!;
+    [PluginService] private static IGameInventory GameInventory { get; set; } = null!;
+    [PluginService] private static ISigScanner SigScanner { get; set; } = null!;
 
     private readonly Configuration config;
     private readonly DalamudServices services;
@@ -45,10 +51,16 @@ public sealed class Plugin : IDalamudPlugin
             ClientState,
             Condition,
             ObjectTable,
+            PartyList,
             TargetManager,
             DataManager,
             TextureProvider,
-            GameGui);
+            GameGui,
+            ContextMenu,
+            AgentLifecycle,
+            AddonLifecycle,
+            GameInventory,
+            SigScanner);
 
         this.config = PluginInterface.GetPluginConfig() as Configuration ?? new Configuration();
         this.config.Migrate();
