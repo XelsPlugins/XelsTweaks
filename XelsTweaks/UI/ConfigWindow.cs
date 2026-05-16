@@ -16,6 +16,7 @@ internal sealed class ConfigWindow : Window, IDisposable
     private const float CategoryButtonHeight = 26f;
     private const float ToggleColumnWidth = 34f;
     private const float TweakConfigIndent = 18f;
+    private const float MenuHeightAllowance = 1.2f;
 
     private static readonly Vector4 AccentColor = new(0.75f, 0.75f, 1.0f, 1.0f);
     private static readonly Vector4 MutedAccentColor = new(0.55f, 0.65f, 1.0f, 1.0f);
@@ -57,7 +58,9 @@ internal sealed class ConfigWindow : Window, IDisposable
 
     public override void Draw()
     {
+        var contentStartY = ImGui.GetCursorPosY();
         this.DrawHeader();
+        var headerHeight = ImGui.GetCursorPosY() - contentStartY;
 
         if (ImGui.BeginTable("##xelstweaks_layout", 2, ImGuiTableFlags.SizingFixedFit | ImGuiTableFlags.NoSavedSettings))
         {
@@ -65,9 +68,14 @@ internal sealed class ConfigWindow : Window, IDisposable
             ImGui.TableSetupColumn("##tweaks", ImGuiTableColumnFlags.WidthStretch);
             ImGui.TableNextRow();
             ImGui.TableSetColumnIndex(0);
+
+            var menuStartY = ImGui.GetCursorPosY();
             this.DrawCategoryList();
+            var menuHeight = ImGui.GetCursorPosY() - menuStartY;
+            var maxTweakPaneHeight = MathF.Max(menuHeight, (menuHeight * MenuHeightAllowance) - headerHeight);
+
             ImGui.TableSetColumnIndex(1);
-            this.DrawTweakPane();
+            this.DrawTweakPane(maxTweakPaneHeight);
             ImGui.EndTable();
         }
     }
@@ -153,13 +161,22 @@ internal sealed class ConfigWindow : Window, IDisposable
         return this.tweakManager.Tweaks.Count(tweak => category == null || tweak.Category == category.Value);
     }
 
-    private void DrawTweakPane()
+    private void DrawTweakPane(float maxPaneHeight)
     {
+        var paneStartY = ImGui.GetCursorPosY();
         this.DrawFilterBar();
         ImGui.Spacing();
         ImGui.Separator();
         ImGui.Spacing();
-        this.DrawTweaks();
+        var filterHeight = ImGui.GetCursorPosY() - paneStartY;
+        var tweakListHeight = MathF.Max(1f, maxPaneHeight - filterHeight);
+
+        if (ImGui.BeginChild("##tweaks_scroll", new Vector2(0f, tweakListHeight), false, ImGuiWindowFlags.None))
+        {
+            this.DrawTweaks();
+        }
+
+        ImGui.EndChild();
     }
 
     private void DrawFilterBar()
