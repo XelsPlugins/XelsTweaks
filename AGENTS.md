@@ -52,9 +52,9 @@ On Linux, set `DALAMUD_HOME` to a directory containing Dalamud dev assemblies. T
 
 ## Release And Metadata
 
-The active custom feed is `Xeltor/XelsDalamudRepo`. Keep this repository listed in that repo's `repos.txt`.
+The active custom feed is `XelsPlugins/XelsDalamudRepo`. Keep this repository listed in that repo's `repos.txt`.
 
-`.github/workflows/validate.yml`, `.github/workflows/pr-preview.yml`, and `.github/workflows/release.yml` are thin wrappers around `Xeltor/XelsDalamud.Workflows`.
+`.github/workflows/validate.yml`, `.github/workflows/pr-preview.yml`, and `.github/workflows/release.yml` are thin wrappers around `XelsPlugins/XelsDalamud.Workflows`.
 
 PR previews use mutable `pr-<PR_NUMBER>` prereleases and may only update central feed testing fields:
 
