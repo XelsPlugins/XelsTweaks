@@ -36,9 +36,11 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
     private const int SetConvertUiItemCountOffset = 20;
     private const int SetConvertUiItemsOffset = 21;
     private const int SetConvertUiItemStride = 7;
+    private const int MaxRestoreAttempts = 6;
 
     private static readonly TimeSpan CandidateRefreshDelay = TimeSpan.FromMilliseconds(300);
     private static readonly TimeSpan ActionDelay = TimeSpan.FromMilliseconds(650);
+    private static readonly TimeSpan RestoreRetryDelay = TimeSpan.FromMilliseconds(1200);
     private static readonly TimeSpan StepTimeout = TimeSpan.FromSeconds(18);
     private static readonly Vector4 WarningColor = new(1f, 0.74f, 0.25f, 1f);
     private static readonly Vector4 ErrorColor = new(1f, 0.35f, 0.35f, 1f);
@@ -53,6 +55,9 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
     private int completedOutfits;
     private int skippedOutfits;
     private uint? waitingForRestoredItemId;
+    private uint? restoreRetryItemId;
+    private int restoreRetryAttempts;
+    private int storedSetRestoreRetryAttempts;
     private int? pendingSetConvertSlot;
     private uint? pendingSetConvertItemId;
     private DateTimeOffset nextActionAt = DateTimeOffset.MinValue;
@@ -422,6 +427,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
     private void BeginNextOutfit()
     {
         this.waitingForRestoredItemId = null;
+        this.ClearRestoreRetryState();
         this.pendingSetConvertSlot = null;
         this.pendingSetConvertItemId = null;
 
@@ -534,23 +540,31 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
         var manager = MirageManager.Instance();
         if (manager == null || !manager->PrismBoxLoaded)
         {
-            this.FailQueue("Glamour Dresser data is not loaded.");
+            this.status = "Waiting for Glamour Dresser data before restoring an outfit piece.";
+            this.nextActionAt = DateTimeOffset.UtcNow + CandidateRefreshDelay;
             return;
         }
 
         var itemIndex = this.FindPrismBoxItemIndex(item.ItemId);
         if (itemIndex < 0)
         {
-            this.FailQueue($"Could not find {item.ItemId} in the Glamour Dresser anymore.");
+            this.ScheduleItemRestoreRetry(
+                item.ItemId,
+                $"Waiting for {item.ItemId} to be available in the Glamour Dresser before restoring {outfit.Name}.",
+                $"Could not find {item.ItemId} in the Glamour Dresser anymore.");
             return;
         }
 
         if (!manager->RestorePrismBoxItem((uint)itemIndex))
         {
-            this.FailQueue("The game refused to restore an outfit piece. Inventory may be full or a unique item may already be owned.");
+            this.ScheduleItemRestoreRetry(
+                item.ItemId,
+                $"The game refused to restore {item.ItemId}; waiting briefly before retrying.",
+                "The game refused to restore an outfit piece. Inventory may be full or a unique item may already be owned.");
             return;
         }
 
+        this.ClearRestoreRetryState();
         this.waitingForRestoredItemId = item.ItemId;
         this.EnterStep(QueueStep.WaitingForRestore, $"Waiting for {item.ItemId} to return to inventory.");
     }
@@ -560,14 +574,18 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
         var manager = MirageManager.Instance();
         if (manager == null || !manager->PrismBoxLoaded)
         {
-            this.FailQueue("Glamour Dresser data is not loaded.");
+            this.status = "Waiting for Glamour Dresser data before restoring existing outfit pieces.";
+            this.nextActionAt = DateTimeOffset.UtcNow + CandidateRefreshDelay;
             return;
         }
 
         var setItemIndex = this.FindPrismBoxItemIndex(outfit.SetItemId);
         if (setItemIndex < 0)
         {
-            this.FailQueue($"Could not find the stored outfit {outfit.SetItemId} in the Glamour Dresser anymore.");
+            this.ScheduleStoredSetRestoreRetry(
+                outfit,
+                $"Waiting for stored outfit {outfit.Name} to be available in the Glamour Dresser.",
+                $"Could not find the stored outfit {outfit.SetItemId} in the Glamour Dresser anymore.");
             return;
         }
 
@@ -590,10 +608,14 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
 
         if (!manager->RestorePrismBoxSetItem((uint)setItemIndex, restoreBits))
         {
-            this.FailQueue("The game refused to restore the existing stored outfit. Inventory may be full or a unique item may already be owned.");
+            this.ScheduleStoredSetRestoreRetry(
+                outfit,
+                $"The game refused to restore existing pieces for {outfit.Name}; waiting briefly before retrying.",
+                "The game refused to restore the existing stored outfit. Inventory may be full or a unique item may already be owned.");
             return;
         }
 
+        this.ClearRestoreRetryState();
         outfit.StoredSetRestored = true;
         this.EnterStep(QueueStep.WaitingForSetRestore, $"Waiting for existing {outfit.Name} outfit pieces to return to inventory.");
     }
@@ -637,6 +659,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
         this.AddRestoredSlot(outfit, restoredSlot);
         outfit.NextRestoreIndex++;
         this.waitingForRestoredItemId = null;
+        this.ClearRestoreRetryState();
         this.EnterStep(QueueStep.RestoringItems, $"Restoring {outfit.Name}.");
     }
 
@@ -1197,11 +1220,64 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
         };
     }
 
+    private void ScheduleItemRestoreRetry(uint itemId, string retryStatus, string finalError)
+    {
+        if (this.restoreRetryItemId != itemId)
+        {
+            this.restoreRetryItemId = itemId;
+            this.restoreRetryAttempts = 0;
+        }
+
+        this.restoreRetryAttempts++;
+        if (this.restoreRetryAttempts >= MaxRestoreAttempts)
+        {
+            this.FailQueue($"{finalError} Retried {MaxRestoreAttempts} times.");
+            return;
+        }
+
+        this.status = $"{retryStatus} Retrying attempt {this.restoreRetryAttempts + 1}/{MaxRestoreAttempts}.";
+        this.nextActionAt = DateTimeOffset.UtcNow + RestoreRetryDelay;
+        this.MarkCandidatesDirty();
+        this.Services.Log.Debug(
+            "Glamour Outfit Compactor restore retry for item {ItemId}: attempt {NextAttempt}/{MaxAttempts}",
+            itemId,
+            this.restoreRetryAttempts + 1,
+            MaxRestoreAttempts);
+    }
+
+    private void ScheduleStoredSetRestoreRetry(QueuedOutfit outfit, string retryStatus, string finalError)
+    {
+        this.storedSetRestoreRetryAttempts++;
+        if (this.storedSetRestoreRetryAttempts >= MaxRestoreAttempts)
+        {
+            this.FailQueue($"{finalError} Retried {MaxRestoreAttempts} times.");
+            return;
+        }
+
+        this.status = $"{retryStatus} Retrying attempt {this.storedSetRestoreRetryAttempts + 1}/{MaxRestoreAttempts}.";
+        this.nextActionAt = DateTimeOffset.UtcNow + RestoreRetryDelay;
+        this.MarkCandidatesDirty();
+        this.Services.Log.Debug(
+            "Glamour Outfit Compactor stored outfit restore retry for {OutfitName} ({SetItemId}): attempt {NextAttempt}/{MaxAttempts}",
+            outfit.Name,
+            outfit.SetItemId,
+            this.storedSetRestoreRetryAttempts + 1,
+            MaxRestoreAttempts);
+    }
+
+    private void ClearRestoreRetryState()
+    {
+        this.restoreRetryItemId = null;
+        this.restoreRetryAttempts = 0;
+        this.storedSetRestoreRetryAttempts = 0;
+    }
+
     private void SkipCurrentOutfit(string message)
     {
         this.skippedOutfits++;
         this.status = message;
         this.currentOutfit = null;
+        this.ClearRestoreRetryState();
         this.pendingSetConvertSlot = null;
         this.pendingSetConvertItemId = null;
         this.BeginNextOutfit();
@@ -1214,6 +1290,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
         this.completedOutfits = 0;
         this.skippedOutfits = 0;
         this.waitingForRestoredItemId = null;
+        this.ClearRestoreRetryState();
         this.pendingSetConvertSlot = null;
         this.pendingSetConvertItemId = null;
         this.queuePaused = false;
@@ -1229,6 +1306,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
     {
         this.queue.Clear();
         this.waitingForRestoredItemId = null;
+        this.ClearRestoreRetryState();
         this.pendingSetConvertSlot = null;
         this.pendingSetConvertItemId = null;
         this.queuePaused = false;
