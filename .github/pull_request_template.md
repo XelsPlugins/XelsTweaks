@@ -1,6 +1,6 @@
 ## Summary
 
-## User-facing release notes
+## Release notes
 
 ## Test plan
 
@@ -22,4 +22,3 @@
 - [ ] no secrets
 - [ ] release notes written
 - [ ] PR title follows Conventional Commits
-

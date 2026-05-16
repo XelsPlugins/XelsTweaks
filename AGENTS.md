@@ -23,7 +23,7 @@ On Linux, set `DALAMUD_HOME` to a directory containing Dalamud dev assemblies. T
 - No direct commits to `main` after branch protection is enabled.
 - All work goes through feature branches and PRs.
 - Commit messages and PR titles must use Conventional Commits.
-- PR bodies must include user-facing release notes.
+- PR bodies must include release notes written for plugin users.
 - Do not manually edit versions unless explicitly instructed.
 - Do not use timestamp versions or CI build numbers as stable public versions.
 - Do not change release workflows without explaining the effect.
