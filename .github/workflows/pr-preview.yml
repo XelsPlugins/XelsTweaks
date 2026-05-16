@@ -1,0 +1,22 @@
+name: PR Preview
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  preview:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    uses: Xeltor/XelsDalamud.Workflows/.github/workflows/plugin-pr-preview.yml@main
+    with:
+      plugin_project_path: XelsTweaks/XelsTweaks.csproj
+      feed_repo: Xeltor/XelsDalamudRepo
+      dotnet_version: 10.0.x
+      internal_name: XelsTweaks
+    secrets:
+      feed_token: ${{ secrets.XELS_DALAMUD_FEED_TOKEN }}
+

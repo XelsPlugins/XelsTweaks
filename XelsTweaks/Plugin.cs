@@ -1,0 +1,184 @@
+using System;
+using System.Linq;
+using Dalamud.Game.Command;
+using Dalamud.Interface.Windowing;
+using Dalamud.IoC;
+using Dalamud.Plugin;
+using Dalamud.Plugin.Services;
+
+namespace XelsTweaks;
+
+public sealed class Plugin : IDalamudPlugin
+{
+    private const string CommandName = "/xelstweaks";
+    private const string ShortCommandName = "/xt";
+    private const string ChatPrefix = "[XelsTweaks]";
+
+    [PluginService] private static IDalamudPluginInterface PluginInterface { get; set; } = null!;
+    [PluginService] private static ICommandManager CommandManager { get; set; } = null!;
+    [PluginService] private static IPluginLog Log { get; set; } = null!;
+    [PluginService] private static IChatGui ChatGui { get; set; } = null!;
+    [PluginService] private static IFramework Framework { get; set; } = null!;
+    [PluginService] private static IClientState ClientState { get; set; } = null!;
+    [PluginService] private static ICondition Condition { get; set; } = null!;
+    [PluginService] private static IObjectTable ObjectTable { get; set; } = null!;
+    [PluginService] private static ITargetManager TargetManager { get; set; } = null!;
+    [PluginService] private static IDataManager DataManager { get; set; } = null!;
+    [PluginService] private static ITextureProvider TextureProvider { get; set; } = null!;
+
+    private readonly Configuration config;
+    private readonly DalamudServices services;
+    private readonly TweakManager tweakManager;
+    private readonly WindowSystem windowSystem = new("XelsTweaks");
+    private readonly ConfigWindow configWindow;
+
+    public Plugin()
+    {
+        this.services = new DalamudServices(
+            PluginInterface,
+            CommandManager,
+            Log,
+            ChatGui,
+            Framework,
+            ClientState,
+            Condition,
+            ObjectTable,
+            TargetManager,
+            DataManager,
+            TextureProvider);
+
+        this.config = PluginInterface.GetPluginConfig() as Configuration ?? new Configuration();
+        this.config.Migrate();
+        this.config.Clamp();
+
+        this.tweakManager = new TweakManager(this.config, this.services, this.SaveConfig);
+        this.tweakManager.Initialize();
+
+        this.configWindow = new ConfigWindow(this.tweakManager);
+        this.windowSystem.AddWindow(this.configWindow);
+
+        CommandManager.AddHandler(CommandName, new CommandInfo(this.OnCommand)
+        {
+            HelpMessage = "Open XelsTweaks. Usage: /xelstweaks or /xt [list|on <id>|off <id>|toggle <id>]"
+        });
+        CommandManager.AddHandler(ShortCommandName, new CommandInfo(this.OnCommand)
+        {
+            HelpMessage = "Open XelsTweaks. Usage: /xt or /xelstweaks [list|on <id>|off <id>|toggle <id>]"
+        });
+
+        PluginInterface.UiBuilder.Draw += this.windowSystem.Draw;
+        PluginInterface.UiBuilder.OpenConfigUi += this.OpenConfig;
+        PluginInterface.UiBuilder.OpenMainUi += this.OpenConfig;
+    }
+
+    public void Dispose()
+    {
+        PluginInterface.UiBuilder.OpenMainUi -= this.OpenConfig;
+        PluginInterface.UiBuilder.OpenConfigUi -= this.OpenConfig;
+        PluginInterface.UiBuilder.Draw -= this.windowSystem.Draw;
+        CommandManager.RemoveHandler(CommandName);
+        CommandManager.RemoveHandler(ShortCommandName);
+        this.windowSystem.RemoveAllWindows();
+        this.configWindow.Dispose();
+        this.tweakManager.Dispose();
+    }
+
+    private void OnCommand(string command, string arguments)
+    {
+        var args = arguments.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (args.Length == 0 || args[0].Equals("config", StringComparison.OrdinalIgnoreCase))
+        {
+            this.OpenConfig();
+            return;
+        }
+
+        switch (args[0].ToLowerInvariant())
+        {
+            case "list":
+                this.PrintTweakList();
+                break;
+            case "on":
+            case "enable":
+                this.SetTweakFromCommand(args, true);
+                break;
+            case "off":
+            case "disable":
+                this.SetTweakFromCommand(args, false);
+                break;
+            case "toggle":
+                this.ToggleTweakFromCommand(args);
+                break;
+            default:
+                this.Print("Usage: /xelstweaks or /xt [list|on <id>|off <id>|toggle <id>]");
+                break;
+        }
+    }
+
+    private void PrintTweakList()
+    {
+        foreach (var tweak in this.tweakManager.Tweaks.OrderBy(tweak => tweak.Category).ThenBy(tweak => tweak.Name))
+        {
+            var state = tweak.IsEnabled ? "on" : "off";
+            this.Print($"{state} - {tweak.Id} - {tweak.Name}");
+        }
+    }
+
+    private void SetTweakFromCommand(string[] args, bool enabled)
+    {
+        if (!this.TryGetCommandTweak(args, out var tweak))
+        {
+            return;
+        }
+
+        this.tweakManager.SetEnabled(tweak, enabled);
+        this.Print($"{tweak.Name} is {(tweak.IsEnabled ? "enabled" : "disabled")}.");
+    }
+
+    private void ToggleTweakFromCommand(string[] args)
+    {
+        if (!this.TryGetCommandTweak(args, out var tweak))
+        {
+            return;
+        }
+
+        this.tweakManager.SetEnabled(tweak, !tweak.IsEnabled);
+        this.Print($"{tweak.Name} is {(tweak.IsEnabled ? "enabled" : "disabled")}.");
+    }
+
+    private bool TryGetCommandTweak(string[] args, out TweakBase tweak)
+    {
+        tweak = null!;
+        if (args.Length < 2)
+        {
+            this.Print("Missing tweak ID. Use /xelstweaks list or /xt list.");
+            return false;
+        }
+
+        var id = args[1];
+        var found = this.tweakManager.FindById(id);
+        if (found == null)
+        {
+            this.Print($"Unknown tweak ID: {id}");
+            return false;
+        }
+
+        tweak = found;
+        return true;
+    }
+
+    private void OpenConfig()
+    {
+        this.configWindow.IsOpen = true;
+    }
+
+    private void SaveConfig()
+    {
+        this.config.Clamp();
+        PluginInterface.SavePluginConfig(this.config);
+    }
+
+    private void Print(string message)
+    {
+        ChatGui.Print($"{ChatPrefix} {message}");
+    }
+}

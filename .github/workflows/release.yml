@@ -1,0 +1,37 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_type:
+        description: Release type
+        required: true
+        default: auto
+        type: choice
+        options:
+          - auto
+          - patch
+          - minor
+          - major
+      dry_run:
+        description: Dry run without publishing
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    uses: Xeltor/XelsDalamud.Workflows/.github/workflows/plugin-release.yml@main
+    with:
+      plugin_project_path: XelsTweaks/XelsTweaks.csproj
+      feed_repo: Xeltor/XelsDalamudRepo
+      release_type: ${{ inputs.release_type }}
+      dry_run: ${{ inputs.dry_run }}
+      dotnet_version: 10.0.x
+      internal_name: XelsTweaks
+    secrets:
+      feed_token: ${{ secrets.XELS_DALAMUD_FEED_TOKEN }}
+
