@@ -499,8 +499,10 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
             return;
         }
 
-        while (outfit.NextRestoreIndex < outfit.RestoreItems.Count && this.TryFindInventoryItem(outfit.RestoreItems[outfit.NextRestoreIndex].ItemId, out _))
+        while (outfit.NextRestoreIndex < outfit.RestoreItems.Count
+            && this.TryFindInventoryItem(outfit.RestoreItems[outfit.NextRestoreIndex].ItemId, out var existingSlot))
         {
+            this.AddRestoredSlot(outfit, existingSlot);
             outfit.NextRestoreIndex++;
         }
 
@@ -653,8 +655,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
 
     private void OpenSetConvert(QueuedOutfit outfit)
     {
-        var sourceItem = outfit.SelectionItems.FirstOrDefault(item => this.TryFindInventoryItem(item.ItemId, out _));
-        if (sourceItem == null || !this.TryFindInventoryItem(sourceItem.ItemId, out var sourceSlot))
+        if (!this.TryFindRestoredSourceSlot(outfit, out var sourceSlot))
         {
             this.FailQueue("Could not find a restored outfit piece in inventory.");
             return;
@@ -674,13 +675,48 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
             return;
         }
 
-        if (!agent->Open(sourceSlot.ItemId, sourceSlot.InventoryType, (int)sourceSlot.Slot, (ushort)dresserAddon.Id, 0, true))
+        try
         {
-            this.FailQueue("The game refused to open Outfit Glamour Creation for the restored outfit piece.");
+            if (!agent->Open(sourceSlot.ItemId, sourceSlot.InventoryType, (int)sourceSlot.Slot, 0, (ushort)dresserAddon.Id, true))
+            {
+                this.FailQueue("The game refused to open Outfit Glamour Creation for the restored outfit piece.");
+                return;
+            }
+        }
+        catch (Exception ex)
+        {
+            this.FailQueue("Failed to open Outfit Glamour Creation for the restored outfit piece.");
+            this.Services.Log.Warning(ex, "Failed to open Outfit Glamour Creation for {OutfitName} from item {ItemId}", outfit.Name, sourceSlot.ItemId);
             return;
         }
 
         this.EnterStep(QueueStep.FillingSetConvert, $"Filling Outfit Glamour Creation for {outfit.Name}.");
+    }
+
+    private bool TryFindRestoredSourceSlot(QueuedOutfit outfit, out InventorySlot sourceSlot)
+    {
+        var expectedItems = outfit.SelectionItems.Select(item => item.ItemId).ToHashSet();
+        foreach (var restoredSlot in outfit.RestoredSlots)
+        {
+            if (!expectedItems.Contains(restoredSlot.ItemId) || this.IsInventorySlotConsumed(restoredSlot))
+            {
+                continue;
+            }
+
+            sourceSlot = restoredSlot;
+            return true;
+        }
+
+        foreach (var item in outfit.SelectionItems)
+        {
+            if (this.TryFindInventoryItem(item.ItemId, out sourceSlot))
+            {
+                return true;
+            }
+        }
+
+        sourceSlot = default;
+        return false;
     }
 
     private void FillSetConvert(QueuedOutfit outfit)
