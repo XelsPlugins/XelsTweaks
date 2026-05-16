@@ -15,7 +15,8 @@ internal sealed class DalamudServices(
     IObjectTable objectTable,
     ITargetManager targetManager,
     IDataManager dataManager,
-    ITextureProvider textureProvider)
+    ITextureProvider textureProvider,
+    IGameGui gameGui)
 {
     public IDalamudPluginInterface PluginInterface { get; } = pluginInterface;
     public ICommandManager CommandManager { get; } = commandManager;
@@ -28,5 +29,5 @@ internal sealed class DalamudServices(
     public ITargetManager TargetManager { get; } = targetManager;
     public IDataManager DataManager { get; } = dataManager;
     public ITextureProvider TextureProvider { get; } = textureProvider;
+    public IGameGui GameGui { get; } = gameGui;
 }
-
