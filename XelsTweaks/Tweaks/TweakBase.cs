@@ -18,6 +18,7 @@ internal abstract class TweakBase : IDisposable
     public abstract string Name { get; }
     public abstract string Description { get; }
     public abstract TweakCategory Category { get; }
+    public virtual bool DrawConfigWhenDisabled => false;
     public bool IsEnabled { get; private set; }
     public string? LastError { get; internal set; }
 
@@ -129,4 +130,3 @@ internal abstract class TweakBase : IDisposable
         this.saveConfig();
     }
 }
-

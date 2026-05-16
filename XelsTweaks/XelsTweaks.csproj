@@ -33,9 +33,15 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <None Include="images\logo.png">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <TargetPath>logo.png</TargetPath>
+    </None>
+  </ItemGroup>
+
+  <ItemGroup>
     <Reference Include="Dalamud.Common">
       <HintPath>$(DalamudLibPath)Dalamud.Common.dll</HintPath>
     </Reference>
   </ItemGroup>
 </Project>
-

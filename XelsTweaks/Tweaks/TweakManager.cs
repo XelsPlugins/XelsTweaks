@@ -1,7 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using XelsTweaks.Tweaks.General;
+using XelsTweaks.Tweaks.Utility;
 
 namespace XelsTweaks.Tweaks;
 
@@ -74,9 +74,9 @@ internal sealed class TweakManager : IDisposable
 
     private void RegisterTweaks()
     {
-        this.Register(new ExampleChatTweak(
+        this.Register(new AutoLoginTweak(
             this.services,
-            this.config.GetOrCreateTweakState(ExampleChatTweak.TweakId),
+            this.config.GetOrCreateTweakState(AutoLoginTweak.TweakId),
             this.saveConfig));
     }
 
@@ -120,4 +120,3 @@ internal sealed class TweakManager : IDisposable
         }
     }
 }
-

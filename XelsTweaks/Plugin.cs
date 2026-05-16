@@ -1,4 +1,5 @@
 using System;
+using System.IO;
 using System.Linq;
 using Dalamud.Game.Command;
 using Dalamud.Interface.Windowing;
@@ -25,6 +26,7 @@ public sealed class Plugin : IDalamudPlugin
     [PluginService] private static ITargetManager TargetManager { get; set; } = null!;
     [PluginService] private static IDataManager DataManager { get; set; } = null!;
     [PluginService] private static ITextureProvider TextureProvider { get; set; } = null!;
+    [PluginService] private static IGameGui GameGui { get; set; } = null!;
 
     private readonly Configuration config;
     private readonly DalamudServices services;
@@ -45,7 +47,8 @@ public sealed class Plugin : IDalamudPlugin
             ObjectTable,
             TargetManager,
             DataManager,
-            TextureProvider);
+            TextureProvider,
+            GameGui);
 
         this.config = PluginInterface.GetPluginConfig() as Configuration ?? new Configuration();
         this.config.Migrate();
@@ -54,7 +57,10 @@ public sealed class Plugin : IDalamudPlugin
         this.tweakManager = new TweakManager(this.config, this.services, this.SaveConfig);
         this.tweakManager.Initialize();
 
-        this.configWindow = new ConfigWindow(this.tweakManager);
+        this.configWindow = new ConfigWindow(
+            this.tweakManager,
+            TextureProvider,
+            Path.Combine(PluginInterface.AssemblyLocation.DirectoryName ?? string.Empty, "logo.png"));
         this.windowSystem.AddWindow(this.configWindow);
 
         CommandManager.AddHandler(CommandName, new CommandInfo(this.OnCommand)
