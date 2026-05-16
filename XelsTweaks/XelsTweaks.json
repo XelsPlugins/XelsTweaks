@@ -6,10 +6,10 @@
   "InternalName": "XelsTweaks",
   "DalamudApiLevel": "15",
   "MinimumDalamudVersion": "15.0.0.0",
+  "IconUrl": "https://raw.githubusercontent.com/XelsPlugins/XelsTweaks/main/XelsTweaks/images/logo.png",
   "Tags": [
     "tweaks",
     "qol",
     "utility"
   ]
 }
-
