@@ -18,7 +18,7 @@ On Linux, make sure Dalamud dev assemblies are available at `$DALAMUD_HOME` or `
 Add the following URL to Dalamud's custom plugin repositories:
 
 ```text
-https://raw.githubusercontent.com/Xeltor/XelsDalamudRepo/main/pluginmaster.json
+https://raw.githubusercontent.com/XelsPlugins/XelsDalamudRepo/main/pluginmaster.json
 ```
 
 Stable builds are published manually. Testing builds are generated from PR previews and require Dalamud's plugin testing versions option.
