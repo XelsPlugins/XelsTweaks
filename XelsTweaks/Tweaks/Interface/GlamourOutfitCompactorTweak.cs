@@ -9,6 +9,7 @@ using Dalamud.Game.Addon.Lifecycle;
 using Dalamud.Game.Addon.Lifecycle.AddonArgTypes;
 using Dalamud.Game.Inventory.InventoryEventArgTypes;
 using Dalamud.Plugin.Services;
+using Dalamud.Utility;
 using FFXIVClientStructs.FFXIV.Client.Game;
 using FFXIVClientStructs.FFXIV.Client.UI;
 using FFXIVClientStructs.FFXIV.Client.UI.Agent;
@@ -24,6 +25,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
     private const string ConfirmDyedOutfitsKey = "confirmDyedOutfits";
     private const string ShowOverlayOnlyWhenEligibleKey = "showOverlayOnlyWhenEligible";
     private const string NewInventoryOutfitPolicyKey = "newInventoryOutfitMode";
+    private const string RestoreDuplicateItemsKey = "restoreDuplicateItems";
     private const string DresserAddonName = "MiragePrismPrismBox";
     private const string PlateAddonName = "MiragePrismMiragePlate";
     private const string SetConvertAddonName = "MiragePrismPrismSetConvert";
@@ -31,6 +33,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
     private const string SetConvertConfirmAddonName = "MiragePrismPrismSetConvertC";
     private const string SelectYesNoAddonName = "SelectYesno";
     private const string SelectYesNoAlternateAddonName = "SelectYesNo";
+    private const string ContextMenuAddonName = "ContextMenu";
     private const string ContextIconMenuAddonName = "ContextIconMenu";
     private const string OpenSetConvertSignature = "40 53 41 55 48 81 EC ?? ?? ?? ?? 0F B7 84 24";
     private const string AddendumPromptFirstLine = "An outfit glamour matching this gear is available.";
@@ -43,10 +46,14 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
     private const uint ConfirmYesButtonId = 6;
     private const int SetConvertHandOverCallbackId = 13;
     private const uint SetConvertContextMenuActionId = 1021003;
+    private const string AddMissingOutfitGearContextMenuText = "Add Missing Outfit Gear";
     private const int SetConvertUiItemCountOffset = 20;
     private const int SetConvertUiItemsOffset = 21;
     private const int SetConvertUiItemStride = 7;
+    private const int MaxDiagnosticAtkValues = 24;
+    private const int MaxContextMenuEntries = 12;
     private const int MaxRestoreAttempts = 6;
+    private const string SetConvertTargetUnavailableError = "Outfit creation did not offer the expected outfit for this piece.";
 
     private static readonly TimeSpan CandidateRefreshDelay = TimeSpan.FromMilliseconds(300);
     private static readonly TimeSpan ActionDelay = TimeSpan.FromMilliseconds(650);
@@ -55,15 +62,32 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
     private static readonly Vector4 WarningColor = new(1f, 0.74f, 0.25f, 1f);
     private static readonly Vector4 ErrorColor = new(1f, 0.35f, 0.35f, 1f);
     private static readonly Vector4 SuccessColor = new(0.48f, 0.95f, 0.56f, 1f);
+    private static readonly InventoryType[] InventoryBagTypes =
+    [
+        InventoryType.Inventory1,
+        InventoryType.Inventory2,
+        InventoryType.Inventory3,
+        InventoryType.Inventory4
+    ];
 
     private readonly List<OutfitCandidate> candidates = [];
+    private readonly List<DuplicateItemCandidate> duplicateCandidates = [];
     private readonly List<QueuedOutfit> queue = [];
+    private readonly List<QueuedDuplicateItem> duplicateQueue = [];
+    private readonly HashSet<SetConvertSourceKey> unsupportedSetConvertSources = [];
     private uint[] lastPrismBoxItemIds = [];
     private QueueStep step = QueueStep.Idle;
     private QueuedOutfit? currentOutfit;
+    private QueuedDuplicateItem? currentDuplicateItem;
     private int completedOutfits;
     private int skippedOutfits;
+    private int completedDuplicateItems;
+    private int skippedDuplicateItems;
+    private int totalQueuedOutfits;
+    private int totalQueuedDuplicateItems;
     private uint? waitingForRestoredItemId;
+    private DuplicateItemKey? waitingForDuplicateItemKey;
+    private int waitingForDuplicateInventoryCount;
     private uint? restoreRetryItemId;
     private int restoreRetryAttempts;
     private int? pendingSetConvertSlot;
@@ -92,6 +116,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
 
     private bool ConfirmDyedOutfits => this.GetBool(ConfirmDyedOutfitsKey, true);
     private bool ShowOverlayOnlyWhenEligible => this.GetBool(ShowOverlayOnlyWhenEligibleKey, true);
+    private bool RestoreDuplicateItems => this.GetBool(RestoreDuplicateItemsKey, false);
     private NewInventoryOutfitPolicy CurrentNewInventoryOutfitPolicy => (NewInventoryOutfitPolicy)Math.Clamp(
         this.GetInt(NewInventoryOutfitPolicyKey, (int)NewInventoryOutfitPolicy.Off),
         (int)NewInventoryOutfitPolicy.Off,
@@ -107,6 +132,14 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
         {
             this.SetBool(ConfirmDyedOutfitsKey, confirmDyedOutfits);
             changed = true;
+        }
+
+        var restoreDuplicateItems = this.RestoreDuplicateItems;
+        if (ImGui.Checkbox("Restore duplicate dresser items", ref restoreDuplicateItems))
+        {
+            this.SetBool(RestoreDuplicateItemsKey, restoreDuplicateItems);
+            changed = true;
+            this.MarkCandidatesDirty();
         }
 
         var newInventoryOutfitMode = this.CurrentNewInventoryOutfitPolicy;
@@ -140,7 +173,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
 
         ImGui.TextColored(WarningColor, "Important:");
         ImGui.SameLine();
-        ImGui.TextWrapped("Updates only run after you press the overlay button. Loose matching pieces may be moved into new or existing outfit glamours. Creating new outfits from inventory can use more Glamour Dresser slots. Dyed pieces can lose dye when stored, so leave Ask before adding dyed pieces on if you want to review those first.");
+        ImGui.TextWrapped("Cleanup only runs after you press the overlay button. Loose matching pieces may be moved into new or existing outfit glamours. Creating new outfits from inventory can use more Glamour Dresser slots. HQ pieces are ignored because their quality cannot be lowered while the Glamour Dresser is open. Dyed pieces can lose dye when stored, so leave Ask before adding dyed pieces on if you want to review those first. Duplicate dresser items are only matched when both dyes are the same.");
 
         return changed;
     }
@@ -155,13 +188,11 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
         this.Services.AddonLifecycle.RegisterListener(AddonEvent.PostClose, DresserAddonName, this.OnDresserAddonChanged);
         this.Services.AddonLifecycle.RegisterListener(AddonEvent.PostClose, SetConvertAddonName, this.OnSetConvertClosed);
         this.Services.AddonLifecycle.RegisterListener(AddonEvent.PostClose, SetConvertAlternateAddonName, this.OnSetConvertClosed);
-        this.Services.AddonLifecycle.RegisterListener(AddonEvent.PostReceiveEvent, SelectYesNoAddonName, this.OnSelectYesNoReceiveEvent);
         this.MarkCandidatesDirty();
     }
 
     protected override void OnDisable()
     {
-        this.Services.AddonLifecycle.UnregisterListener(AddonEvent.PostReceiveEvent, SelectYesNoAddonName, this.OnSelectYesNoReceiveEvent);
         this.Services.AddonLifecycle.UnregisterListener(AddonEvent.PostClose, SetConvertAlternateAddonName, this.OnSetConvertClosed);
         this.Services.AddonLifecycle.UnregisterListener(AddonEvent.PostClose, SetConvertAddonName, this.OnSetConvertClosed);
         this.Services.AddonLifecycle.UnregisterListener(AddonEvent.PostClose, DresserAddonName, this.OnDresserAddonChanged);
@@ -171,6 +202,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
         this.Services.Framework.Update -= this.OnFrameworkUpdate;
         this.ResetQueue("Disabled.");
         this.candidates.Clear();
+        this.duplicateCandidates.Clear();
         this.lastPrismBoxItemIds = [];
         this.openSetConvertAddress = nint.Zero;
         this.useCurrentSetConvertOpenSignature = false;
@@ -193,26 +225,10 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
             return;
         }
 
-        if (this.IsQueueActive && !this.IsSetConvertOpen())
+        if (this.currentOutfit != null && this.IsQueueActive && !this.IsSetConvertOpen())
         {
             this.FailQueue("Outfit creation closed before the current outfit was stored.");
         }
-    }
-
-    private void OnSelectYesNoReceiveEvent(AddonEvent eventType, AddonArgs args)
-    {
-        if (!this.IsQueueActive
-            || this.currentOutfit == null
-            || args is not AddonReceiveEventArgs receiveArgs)
-        {
-            return;
-        }
-
-        this.Services.Log.Warning(
-            "Glamour Outfit Compactor observed SelectYesno event while updating {OutfitName}: type={AtkEventType}, param={EventParam}",
-            this.currentOutfit.Name,
-            receiveArgs.AtkEventType,
-            receiveArgs.EventParam);
     }
 
     private void OnInventoryChanged(IReadOnlyCollection<InventoryEventArgs> events)
@@ -228,6 +244,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
             {
                 this.status = "Open the Glamour Dresser to find outfits that can be updated.";
                 this.candidates.Clear();
+                this.duplicateCandidates.Clear();
                 this.lastPrismBoxItemIds = [];
             }
 
@@ -250,11 +267,20 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
         if (this.IsTimedQueueStep() && now - this.stepStartedAt > StepTimeout)
         {
             var detail = string.Empty;
-            if (this.step == QueueStep.FillingSetConvert && this.currentOutfit != null)
+            if ((this.step == QueueStep.WaitingForSetConvertOpen
+                    || this.step == QueueStep.FillingSetConvert)
+                && this.currentOutfit != null)
             {
                 var diagnostic = this.GetSetConvertFillDiagnostic(this.currentOutfit);
-                this.Services.Log.Warning("Glamour Outfit Compactor timed out while selecting pieces: {Diagnostic}", diagnostic);
-                detail = " The outfit creation window did not finish selecting all pieces.";
+                this.Services.Log.Warning(
+                    "Glamour Outfit Compactor timed out while {Step}: {Diagnostic}",
+                    this.GetStepDescription(this.step),
+                    diagnostic);
+                detail = this.step switch
+                {
+                    QueueStep.WaitingForSetConvertOpen => " The outfit creation window did not open for the expected outfit.",
+                    _ => " The outfit creation window did not finish selecting all pieces."
+                };
             }
 
             this.FailQueue($"Timed out while {this.GetStepDescription(this.step)}.{detail}");
@@ -275,6 +301,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
 
         if (this.ShowOverlayOnlyWhenEligible
             && this.candidates.Count == 0
+            && this.duplicateCandidates.Count == 0
             && this.step == QueueStep.Idle)
         {
             return;
@@ -318,9 +345,10 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
             }
         }
 
-        if (this.queue.Count > 0)
+        var totalQueuedWork = this.totalQueuedOutfits + this.totalQueuedDuplicateItems;
+        if (totalQueuedWork > 0)
         {
-            ImGui.TextUnformatted($"Progress: {this.completedOutfits} / {this.queue.Count}");
+            ImGui.TextUnformatted($"Progress: {this.completedOutfits + this.completedDuplicateItems} / {totalQueuedWork}");
         }
 
         if (this.lastError != null)
@@ -345,17 +373,17 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
         switch (this.step)
         {
             case QueueStep.Idle:
-                if (this.candidates.Count == 0)
+                if (this.candidates.Count == 0 && this.duplicateCandidates.Count == 0)
                 {
                     ImGui.BeginDisabled();
                 }
 
-                if (ImGui.Button("Update outfits"))
+                if (ImGui.Button("Run cleanup"))
                 {
                     this.StartQueue();
                 }
 
-                if (this.candidates.Count == 0)
+                if (this.candidates.Count == 0 && this.duplicateCandidates.Count == 0)
                 {
                     ImGui.EndDisabled();
                 }
@@ -393,7 +421,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
                 break;
 
             case QueueStep.Complete:
-                if (ImGui.Button("Reset"))
+                if (ImGui.Button("Ok"))
                 {
                     this.ResetQueue("Ready.");
                     this.MarkCandidatesDirty();
@@ -405,7 +433,9 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
                 if (ImGui.Button(this.queuePaused ? "Resume" : "Pause"))
                 {
                     this.queuePaused = !this.queuePaused;
-                    this.status = this.queuePaused ? "Paused." : $"Resuming {this.currentOutfit?.Name ?? "outfit updates"}.";
+                    this.status = this.queuePaused
+                        ? "Paused."
+                        : $"Resuming {this.currentOutfit?.Name ?? this.currentDuplicateItem?.Name ?? "cleanup"}.";
                     this.nextActionAt = DateTimeOffset.UtcNow + ActionDelay;
                     this.stepStartedAt = DateTimeOffset.UtcNow;
                 }
@@ -426,9 +456,16 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
             ImGui.TextDisabled($"{this.currentOutfit.SelectionItems.Count} piece{(this.currentOutfit.SelectionItems.Count == 1 ? string.Empty : "s")} to add{(this.currentOutfit.IsMerge ? " to an existing outfit" : string.Empty)}");
         }
 
-        if (this.skippedOutfits > 0)
+        if (this.currentDuplicateItem != null)
         {
-            ImGui.TextDisabled($"Skipped: {this.skippedOutfits}");
+            ImGui.Spacing();
+            ImGui.TextDisabled($"Restoring duplicate: {this.currentDuplicateItem.Name}");
+        }
+
+        var skippedWork = this.skippedOutfits + this.skippedDuplicateItems;
+        if (skippedWork > 0)
+        {
+            ImGui.TextDisabled($"Skipped: {skippedWork}");
         }
     }
 
@@ -437,14 +474,23 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
         this.RefreshCandidatesIfNeeded(true);
         this.queue.Clear();
         this.queue.AddRange(this.candidates.Select(candidate => new QueuedOutfit(candidate)));
+        this.duplicateQueue.Clear();
+        this.duplicateQueue.AddRange(this.CreateDuplicateCleanupQueue());
         this.completedOutfits = 0;
         this.skippedOutfits = 0;
+        this.completedDuplicateItems = 0;
+        this.skippedDuplicateItems = 0;
+        this.totalQueuedOutfits = this.queue.Count;
+        this.totalQueuedDuplicateItems = this.duplicateQueue.Count;
         this.currentOutfit = null;
+        this.currentDuplicateItem = null;
         this.waitingForRestoredItemId = null;
+        this.waitingForDuplicateItemKey = null;
+        this.waitingForDuplicateInventoryCount = 0;
         this.queuePaused = false;
         this.lastError = null;
 
-        if (this.queue.Count == 0)
+        if (this.queue.Count == 0 && this.duplicateQueue.Count == 0)
         {
             this.ResetQueue("No Glamour Dresser slots to clean up.");
             return;
@@ -456,7 +502,18 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
         }
 
         var glamourPrismCost = this.GetRemainingGlamourPrismCost();
-        this.status = $"Starting {this.queue.Count} outfit update{(this.queue.Count == 1 ? string.Empty : "s")}.";
+        var startingMessages = new List<string>();
+        if (this.queue.Count > 0)
+        {
+            startingMessages.Add($"{this.queue.Count} outfit update{(this.queue.Count == 1 ? string.Empty : "s")}");
+        }
+
+        if (this.duplicateQueue.Count > 0)
+        {
+            startingMessages.Add($"{this.duplicateQueue.Count} duplicate item{(this.duplicateQueue.Count == 1 ? string.Empty : "s")}");
+        }
+
+        this.status = $"Starting cleanup: {string.Join(", ", startingMessages)}.";
         if (glamourPrismCost > 0)
         {
             this.status += $" Requires {glamourPrismCost} Glamour Prism{(glamourPrismCost == 1 ? string.Empty : "s")}.";
@@ -471,15 +528,14 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
         this.ClearRestoreRetryState();
         this.pendingSetConvertSlot = null;
         this.pendingSetConvertItemId = null;
+        this.currentDuplicateItem = null;
+        this.waitingForDuplicateItemKey = null;
+        this.waitingForDuplicateInventoryCount = 0;
 
         if (this.queue.Count == 0)
         {
             this.currentOutfit = null;
-            var skippedMessage = this.skippedOutfits == 0
-                ? string.Empty
-                : $" Skipped {this.skippedOutfits} outfit{(this.skippedOutfits == 1 ? string.Empty : "s")}.";
-            this.EnterStep(QueueStep.Complete, $"Updated {this.completedOutfits} outfit{(this.completedOutfits == 1 ? string.Empty : "s")}.{skippedMessage}");
-            this.MarkCandidatesDirty();
+            this.BeginNextDuplicateItem();
             return;
         }
 
@@ -505,9 +561,72 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
         this.EnterStep(QueueStep.RestoringItems, $"Restoring pieces for {this.currentOutfit.Name}.");
     }
 
+    private void BeginNextDuplicateItem()
+    {
+        this.currentOutfit = null;
+        this.waitingForDuplicateItemKey = null;
+        this.waitingForDuplicateInventoryCount = 0;
+        this.ClearRestoreRetryState();
+
+        while (this.duplicateQueue.Count > 0)
+        {
+            this.currentDuplicateItem = this.duplicateQueue[0];
+            this.duplicateQueue.RemoveAt(0);
+
+            var remainingDuplicates = this.CountPrismBoxItems(this.currentDuplicateItem.Key);
+            if (remainingDuplicates <= 1)
+            {
+                this.completedDuplicateItems++;
+                continue;
+            }
+
+            if (this.CountAvailableInventorySlots() <= 0)
+            {
+                this.skippedDuplicateItems++;
+                this.status = $"Skipped duplicate {this.currentDuplicateItem.Name}; inventory is full.";
+                continue;
+            }
+
+            this.EnterStep(QueueStep.RestoringDuplicateItem, $"Restoring a duplicate {this.currentDuplicateItem.Name}.");
+            return;
+        }
+
+        this.currentDuplicateItem = null;
+        var skippedMessages = new List<string>();
+        if (this.skippedOutfits > 0)
+        {
+            skippedMessages.Add($"Skipped {this.skippedOutfits} outfit{(this.skippedOutfits == 1 ? string.Empty : "s")}.");
+        }
+
+        if (this.skippedDuplicateItems > 0)
+        {
+            skippedMessages.Add($"Skipped {this.skippedDuplicateItems} duplicate item{(this.skippedDuplicateItems == 1 ? string.Empty : "s")}.");
+        }
+
+        var completedMessages = new List<string>();
+        if (this.totalQueuedOutfits > 0)
+        {
+            completedMessages.Add($"Updated {this.completedOutfits} outfit{(this.completedOutfits == 1 ? string.Empty : "s")}.");
+        }
+
+        if (this.totalQueuedDuplicateItems > 0)
+        {
+            completedMessages.Add($"Restored {this.completedDuplicateItems} duplicate item{(this.completedDuplicateItems == 1 ? string.Empty : "s")}.");
+        }
+
+        var skippedMessage = skippedMessages.Count == 0
+            ? string.Empty
+            : $" {string.Join(" ", skippedMessages)}";
+        var completedMessage = completedMessages.Count == 0
+            ? "Cleanup complete."
+            : string.Join(" ", completedMessages);
+        this.EnterStep(QueueStep.Complete, $"{completedMessage}{skippedMessage}");
+        this.MarkCandidatesDirty();
+    }
+
     private void AdvanceQueue()
     {
-        if (this.currentOutfit == null)
+        if (this.currentOutfit == null && this.currentDuplicateItem == null)
         {
             this.BeginNextOutfit();
             return;
@@ -515,29 +634,82 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
 
         switch (this.step)
         {
+            case QueueStep.RestoringDuplicateItem:
+                if (this.currentDuplicateItem != null)
+                {
+                    this.RestoreDuplicateItem(this.currentDuplicateItem);
+                }
+
+                break;
+            case QueueStep.WaitingForDuplicateRestore:
+                if (this.currentDuplicateItem != null)
+                {
+                    this.WaitForDuplicateRestore(this.currentDuplicateItem);
+                }
+
+                break;
             case QueueStep.RestoringItems:
-                this.RestoreNextItem(this.currentOutfit);
+                if (this.currentOutfit != null)
+                {
+                    this.RestoreNextItem(this.currentOutfit);
+                }
+
                 break;
             case QueueStep.WaitingForRestore:
-                this.WaitForRestoredItem(this.currentOutfit);
+                if (this.currentOutfit != null)
+                {
+                    this.WaitForRestoredItem(this.currentOutfit);
+                }
+
                 break;
             case QueueStep.OpeningSetConvert:
-                this.OpenSetConvert(this.currentOutfit);
+                if (this.currentOutfit != null)
+                {
+                    this.OpenSetConvert(this.currentOutfit);
+                }
+
+                break;
+            case QueueStep.WaitingForSetConvertOpen:
+                if (this.currentOutfit != null)
+                {
+                    this.WaitForSetConvertOpen(this.currentOutfit);
+                }
+
                 break;
             case QueueStep.FillingSetConvert:
-                this.FillSetConvert(this.currentOutfit);
+                if (this.currentOutfit != null)
+                {
+                    this.FillSetConvert(this.currentOutfit);
+                }
+
                 break;
             case QueueStep.ValidatingSetConvert:
-                this.ValidateSetConvert(this.currentOutfit);
+                if (this.currentOutfit != null)
+                {
+                    this.ValidateSetConvert(this.currentOutfit);
+                }
+
                 break;
             case QueueStep.StoringOutfit:
-                this.StoreOutfit(this.currentOutfit);
+                if (this.currentOutfit != null)
+                {
+                    this.StoreOutfit(this.currentOutfit);
+                }
+
                 break;
             case QueueStep.ConfirmingStore:
-                this.ConfirmStoreOutfit(this.currentOutfit);
+                if (this.currentOutfit != null)
+                {
+                    this.ConfirmStoreOutfit(this.currentOutfit);
+                }
+
                 break;
             case QueueStep.WaitingForStore:
-                this.WaitForStoredOutfit(this.currentOutfit);
+                if (this.currentOutfit != null)
+                {
+                    this.WaitForStoredOutfit(this.currentOutfit);
+                }
+
                 break;
         }
     }
@@ -545,6 +717,85 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
     private bool IsTimedQueueStep()
     {
         return this.step != QueueStep.WaitingForDyedConfirmation;
+    }
+
+    private void RestoreDuplicateItem(QueuedDuplicateItem? item)
+    {
+        if (item == null)
+        {
+            this.BeginNextDuplicateItem();
+            return;
+        }
+
+        var remainingDuplicates = this.CountPrismBoxItems(item.Key);
+        if (remainingDuplicates <= 1)
+        {
+            this.completedDuplicateItems++;
+            this.BeginNextDuplicateItem();
+            return;
+        }
+
+        if (this.CountAvailableInventorySlots() <= 0)
+        {
+            this.skippedDuplicateItems++;
+            this.status = $"Skipped duplicate {item.Name}; inventory is full.";
+            this.BeginNextDuplicateItem();
+            return;
+        }
+
+        var manager = MirageManager.Instance();
+        if (manager == null || !manager->PrismBoxLoaded)
+        {
+            this.status = "Waiting for the Glamour Dresser before restoring a duplicate item.";
+            this.nextActionAt = DateTimeOffset.UtcNow + CandidateRefreshDelay;
+            return;
+        }
+
+        var itemIndex = this.FindPrismBoxItemIndex(item.Key);
+        if (itemIndex < 0)
+        {
+            this.completedDuplicateItems++;
+            this.BeginNextDuplicateItem();
+            return;
+        }
+
+        var inventoryCountBeforeRestore = this.CountInventoryBagItems(item.Key);
+        if (!manager->RestorePrismBoxItem((uint)itemIndex))
+        {
+            this.ScheduleItemRestoreRetry(
+                item.Key.ItemId,
+                "Could not restore a duplicate item yet; waiting briefly before trying again.",
+                "Could not restore a duplicate item. Inventory may be full, or you may already have a unique item.");
+            return;
+        }
+
+        this.ClearRestoreRetryState();
+        this.waitingForDuplicateItemKey = item.Key;
+        this.waitingForDuplicateInventoryCount = inventoryCountBeforeRestore;
+        this.EnterStep(QueueStep.WaitingForDuplicateRestore, $"Waiting for duplicate {item.Name} to return to inventory.");
+    }
+
+    private void WaitForDuplicateRestore(QueuedDuplicateItem? item)
+    {
+        if (item == null || this.waitingForDuplicateItemKey == null)
+        {
+            this.EnterStep(QueueStep.RestoringDuplicateItem, $"Restoring a duplicate {item?.Name ?? "item"}.");
+            return;
+        }
+
+        var key = this.waitingForDuplicateItemKey.Value;
+        if (this.CountInventoryBagItems(key) <= this.waitingForDuplicateInventoryCount)
+        {
+            this.nextActionAt = DateTimeOffset.UtcNow + CandidateRefreshDelay;
+            return;
+        }
+
+        this.completedDuplicateItems++;
+        this.waitingForDuplicateItemKey = null;
+        this.waitingForDuplicateInventoryCount = 0;
+        this.ClearRestoreRetryState();
+        this.MarkCandidatesDirty();
+        this.BeginNextDuplicateItem();
     }
 
     private void RestoreNextItem(QueuedOutfit outfit)
@@ -555,7 +806,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
         }
 
         while (outfit.NextRestoreIndex < outfit.RestoreItems.Count
-            && this.TryFindInventoryItem(outfit.RestoreItems[outfit.NextRestoreIndex].ItemId, out var existingSlot))
+            && this.TryFindInventoryBagItem(outfit.RestoreItems[outfit.NextRestoreIndex], out var existingSlot))
         {
             this.AddRestoredSlot(outfit, existingSlot);
             outfit.NextRestoreIndex++;
@@ -614,7 +865,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
             return;
         }
 
-        if (!this.TryFindInventoryItem(this.waitingForRestoredItemId.Value, out var restoredSlot))
+        if (!this.TryFindInventoryBagItem(this.waitingForRestoredItemId.Value, out var restoredSlot))
         {
             this.nextActionAt = DateTimeOffset.UtcNow + CandidateRefreshDelay;
             return;
@@ -629,8 +880,15 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
 
     private void AddRestoredSlot(QueuedOutfit outfit, InventorySlot slot)
     {
-        if (outfit.RestoredSlots.Any(existing => existing.InventoryType == slot.InventoryType && existing.Slot == slot.Slot))
+        for (var i = 0; i < outfit.RestoredSlots.Count; i++)
         {
+            var existing = outfit.RestoredSlots[i];
+            if (existing.InventoryType != slot.InventoryType || existing.Slot != slot.Slot)
+            {
+                continue;
+            }
+
+            outfit.RestoredSlots[i] = slot;
             return;
         }
 
@@ -641,7 +899,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
     {
         foreach (var item in outfit.SelectionItems)
         {
-            if (!this.TryFindInventoryItem(item.ItemId, out var slot))
+            if (!this.TryFindOutfitInventoryItem(outfit, item.ItemId, ItemQualityRequirement.Normal, out var slot))
             {
                 error = "Could not find one of the pieces to add in inventory. Stopped before opening outfit creation.";
                 return false;
@@ -671,7 +929,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
             null) != null;
     }
 
-    private void OpenSetConvertAgent(AgentMiragePrismPrismSetConvert* agent, InventorySlot sourceSlot, ushort dresserAddonId)
+    private void OpenSetConvertAgent(AgentMiragePrismPrismSetConvert* agent, uint itemId, InventoryType inventoryType, int slot, ushort dresserAddonId)
     {
         if (this.openSetConvertAddress == nint.Zero)
         {
@@ -681,23 +939,16 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
         if (this.useCurrentSetConvertOpenSignature)
         {
             var open = (delegate* unmanaged<AgentMiragePrismPrismSetConvert*, uint, InventoryType, int, ushort, ushort, bool, bool>)(void*)this.openSetConvertAddress;
-            _ = open(agent, sourceSlot.ItemId, sourceSlot.InventoryType, (int)sourceSlot.Slot, dresserAddonId, 0, true);
+            _ = open(agent, itemId, inventoryType, slot, 0, dresserAddonId, true);
             return;
         }
 
         var legacyOpen = (delegate* unmanaged<AgentMiragePrismPrismSetConvert*, uint, InventoryType, int, int, bool, void>)(void*)this.openSetConvertAddress;
-        legacyOpen(agent, sourceSlot.ItemId, sourceSlot.InventoryType, (int)sourceSlot.Slot, dresserAddonId, true);
+        legacyOpen(agent, itemId, inventoryType, slot, dresserAddonId, true);
     }
 
     private void OpenSetConvert(QueuedOutfit outfit)
     {
-        var sourceItem = outfit.SelectionItems.FirstOrDefault(item => this.TryFindInventoryItem(item.ItemId, out _));
-        if (sourceItem == null || !this.TryFindInventoryItem(sourceItem.ItemId, out var sourceSlot))
-        {
-            this.FailQueue("Could not find an outfit piece to add in inventory.");
-            return;
-        }
-
         var dresserAddon = this.Services.GameGui.GetAddonByName(DresserAddonName, 1);
         if (dresserAddon.IsNull || dresserAddon.Address == IntPtr.Zero)
         {
@@ -712,24 +963,329 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
             return;
         }
 
+        if (!this.TryGetNextSetConvertSource(outfit, out var sourceItem, out var sourceSlot))
+        {
+            if (outfit.IsMerge && !outfit.StoredSetConvertOpenAttempted)
+            {
+                outfit.StoredSetConvertOpenAttempted = true;
+                this.OpenSetConvertFromStoredOutfit(outfit, agent, dresserAddon.Id);
+                return;
+            }
+
+            this.SkipCurrentOutfit($"Skipped {outfit.Name}; the game did not offer that outfit for the available pieces.");
+            return;
+        }
+
         try
         {
+            outfit.SetConvertSourceItemIdsTried.Add(sourceItem.ItemId);
+            outfit.CurrentSetConvertSourceItemId = sourceItem.ItemId;
+            outfit.SetConvertOutfitSwitchAttempted = false;
+            outfit.NativeAddendumAccepted = false;
+
+            this.pendingSetConvertSlot = null;
+            this.pendingSetConvertItemId = null;
+
             this.Services.Log.Debug(
                 "Glamour Outfit Compactor opening Outfit Glamour Creation for {OutfitName} from item {ItemId} at {InventoryType}:{Slot}",
                 outfit.Name,
-                sourceSlot.ItemId,
+                sourceSlot.RawItemId,
                 sourceSlot.InventoryType,
                 sourceSlot.Slot);
-            this.OpenSetConvertAgent(agent, sourceSlot, dresserAddon.Id);
+            this.OpenSetConvertAgent(agent, sourceSlot.RawItemId, sourceSlot.InventoryType, (int)sourceSlot.Slot, dresserAddon.Id);
         }
         catch (Exception ex)
         {
             this.FailQueue("Could not open outfit creation for the piece to add.");
-            this.Services.Log.Warning(ex, "Failed to open Outfit Glamour Creation for {OutfitName} from item {ItemId}", outfit.Name, sourceSlot.ItemId);
+            this.Services.Log.Warning(ex, "Failed to open Outfit Glamour Creation for {OutfitName} from item {ItemId}", outfit.Name, sourceSlot.RawItemId);
             return;
         }
 
+        this.EnterStep(QueueStep.WaitingForSetConvertOpen, $"Waiting for outfit creation to open for {outfit.Name}.");
+    }
+
+    private void OpenSetConvertFromStoredOutfit(QueuedOutfit outfit, AgentMiragePrismPrismSetConvert* agent, ushort dresserAddonId)
+    {
+        var itemIndex = this.FindPrismBoxItemIndex(outfit.SetItemId);
+        if (itemIndex < 0)
+        {
+            this.SkipCurrentOutfit($"Skipped {outfit.Name}; the existing outfit is no longer in the Glamour Dresser.");
+            return;
+        }
+
+        var manager = MirageManager.Instance();
+        if (manager == null || !manager->PrismBoxLoaded)
+        {
+            this.FailQueue("Glamour Dresser data is not available.");
+            return;
+        }
+
+        var rawSetItemId = manager->PrismBoxItemIds[itemIndex];
+        if (GetBaseItemId(rawSetItemId) != outfit.SetItemId)
+        {
+            this.FailQueue("Glamour Dresser data changed before outfit creation could open.");
+            return;
+        }
+
+        try
+        {
+            outfit.CurrentSetConvertSourceItemId = null;
+            outfit.SetConvertOutfitSwitchAttempted = false;
+            outfit.NativeAddendumAccepted = false;
+            this.pendingSetConvertSlot = null;
+            this.pendingSetConvertItemId = null;
+
+            this.Services.Log.Debug(
+                "Glamour Outfit Compactor opening Outfit Glamour Creation for existing outfit {OutfitName} from Glamour Dresser index {ItemIndex}",
+                outfit.Name,
+                itemIndex);
+            this.TryOpenStoredOutfitAddMissing(outfit, agent, dresserAddonId);
+        }
+        catch (Exception ex)
+        {
+            this.FailQueue("Could not open outfit creation for the existing outfit.");
+            this.Services.Log.Warning(ex, "Failed to open Outfit Glamour Creation for existing outfit {OutfitName} at Glamour Dresser index {ItemIndex}", outfit.Name, itemIndex);
+            return;
+        }
+
+        this.EnterStep(QueueStep.WaitingForSetConvertOpen, $"Waiting for outfit creation to open for {outfit.Name}.");
+    }
+
+    private bool TryOpenStoredOutfitAddMissing(QueuedOutfit outfit, AgentMiragePrismPrismSetConvert* agent, ushort dresserAddonId)
+    {
+        if (!this.TryPrepareStoredOutfitContext(outfit, agent, out var contextError))
+        {
+            this.Services.Log.Debug(
+                "Glamour Outfit Compactor could not prepare Add Missing Outfit Gear for {OutfitName}: {Error}",
+                outfit.Name,
+                contextError ?? "unknown error");
+            this.status = $"Opening existing outfit {outfit.Name}.";
+            this.nextActionAt = DateTimeOffset.UtcNow + CandidateRefreshDelay;
+            return false;
+        }
+
+        if (this.TrySelectAddMissingOutfitGearContextMenu(dresserAddonId, out var menuError))
+        {
+            return true;
+        }
+
+        this.Services.Log.Debug(
+            "Glamour Outfit Compactor could not use native Add Missing Outfit Gear context menu for {OutfitName}: {Error}",
+            outfit.Name,
+            menuError ?? "unknown error");
+        this.status = $"Opening existing outfit {outfit.Name}.";
+        this.nextActionAt = DateTimeOffset.UtcNow + CandidateRefreshDelay;
+        return false;
+    }
+
+    private void WaitForSetConvertOpen(QueuedOutfit outfit)
+    {
+        if (this.TryHandleAddendumPrompt(outfit, out var promptError) || promptError != null)
+        {
+            if (promptError != null)
+            {
+                this.FailQueue(promptError);
+            }
+
+            return;
+        }
+
+        if (!this.TryGetSetConvertAddon(out var addon))
+        {
+            if (outfit.IsMerge)
+            {
+                var dresserAddon = this.Services.GameGui.GetAddonByName(DresserAddonName, 1);
+                var agent = AgentMiragePrismPrismSetConvert.Instance();
+                if (!dresserAddon.IsNull
+                    && dresserAddon.Address != IntPtr.Zero
+                    && agent != null)
+                {
+                    this.TryOpenStoredOutfitAddMissing(outfit, agent, dresserAddon.Id);
+                }
+            }
+
+            this.status = $"Waiting for outfit creation to open for {outfit.Name}.";
+            this.nextActionAt = DateTimeOffset.UtcNow + CandidateRefreshDelay;
+            return;
+        }
+
+        if (!this.TryReadSetConvertUiItems(addon, out var dataItems, out var error))
+        {
+            if (error != null)
+            {
+                this.status = error;
+            }
+
+            this.nextActionAt = DateTimeOffset.UtcNow + CandidateRefreshDelay;
+            return;
+        }
+
+        var setItems = outfit.SetItemIds.ToHashSet();
+        var dataItemIds = dataItems.Select(item => item.ItemId).ToHashSet();
+        if (!dataItemIds.SetEquals(setItems))
+        {
+            if (this.TrySwitchSetConvertOutfit(outfit, out error))
+            {
+                return;
+            }
+
+            error ??= "Outfit creation opened for a different outfit and could not switch to the current outfit.";
+            if (!this.TryRecoverFromSetConvertError(outfit, error))
+            {
+                this.FailQueue(error);
+            }
+
+            return;
+        }
+
+        if (outfit.IsMerge)
+        {
+            var agent = AgentMiragePrismPrismSetConvert.Instance();
+            if (agent == null || !this.TryPrepareStoredOutfitContext(outfit, agent, out error))
+            {
+                this.FailQueue(error ?? "Could not prepare the existing outfit context.");
+                return;
+            }
+        }
+
         this.EnterStep(QueueStep.FillingSetConvert, $"Selecting pieces for {outfit.Name}.");
+    }
+
+    private bool TryPrepareStoredOutfitContext(QueuedOutfit outfit, AgentMiragePrismPrismSetConvert* setConvertAgent, out string? error)
+    {
+        error = null;
+        var itemIndex = this.FindPrismBoxItemIndex(outfit.SetItemId);
+        if (itemIndex < 0)
+        {
+            error = $"Stored outfit {outfit.Name} is no longer in the Glamour Dresser.";
+            return false;
+        }
+
+        var prismBoxAgent = AgentMiragePrismPrismBox.Instance();
+        if (prismBoxAgent == null || prismBoxAgent->Data == null)
+        {
+            error = "Glamour Dresser data is not available.";
+            return false;
+        }
+
+        prismBoxAgent->Data->TempContextItemIndex = itemIndex;
+        prismBoxAgent->Data->TempContextItem = prismBoxAgent->Data->PrismBoxItems[itemIndex];
+
+        if (setConvertAgent->Data != null)
+        {
+            setConvertAgent->Data->ContextMenuItemIndex = itemIndex;
+        }
+
+        return true;
+    }
+
+    private bool TrySelectAddMissingOutfitGearContextMenu(ushort dresserAddonId, out string? error)
+    {
+        error = null;
+        var contextAgent = AgentContext.Instance();
+        if (contextAgent == null)
+        {
+            error = "Could not open Add Missing Outfit Gear because the native context menu state is not available.";
+            return false;
+        }
+
+        contextAgent->OpenContextMenuForAddon(dresserAddonId, true);
+
+        var contextMenuHandle = this.Services.GameGui.GetAddonByName(ContextMenuAddonName, 1);
+        if (contextMenuHandle.IsNull || contextMenuHandle.Address == IntPtr.Zero)
+        {
+            error = "Could not open Add Missing Outfit Gear because the native context menu is not available.";
+            return false;
+        }
+
+        var addon = (AtkUnitBase*)contextMenuHandle.Address;
+        if (!addon->IsVisible)
+        {
+            error = "The native context menu did not open.";
+            return false;
+        }
+
+        if (!this.TryReadAtkUInt(addon, 0, out var entryCount) || entryCount == 0)
+        {
+            error = "Could not open Add Missing Outfit Gear because the native context menu was not prepared.";
+            return false;
+        }
+
+        if (!this.TryFindContextMenuEntry(addon, (int)entryCount, AddMissingOutfitGearContextMenuText, out var entryIndex))
+        {
+            error = "Could not open Add Missing Outfit Gear because the native context menu does not contain the expected action.";
+            return false;
+        }
+
+        this.Services.Log.Debug(
+            "Glamour Outfit Compactor selecting native context menu entry {EntryIndex}: {ContextMenuDiagnostic}",
+            entryIndex,
+            $"{GetAtkValuesDiagnostic(addon)}, entries={this.GetContextMenuEntryTextDiagnostic(addon, Math.Min((int)entryCount, MaxContextMenuEntries))}");
+        var contextMenu = (AddonContextMenu*)addon;
+        if (!contextMenu->OnMenuSelected(entryIndex, 0))
+        {
+            error = "Could not open Add Missing Outfit Gear from the native context menu.";
+            return false;
+        }
+
+        return true;
+    }
+
+    private bool TryGetNextSetConvertSource(QueuedOutfit outfit, out CandidateItem sourceItem, out InventorySlot sourceSlot)
+    {
+        foreach (var item in outfit.SelectionItems
+            .OrderBy(item => this.GetSetConvertSourceRank(item.ItemId, outfit.SetItemId))
+            .ThenBy(item => item.ItemId))
+        {
+            if (outfit.SetConvertSourceItemIdsTried.Contains(item.ItemId))
+            {
+                continue;
+            }
+
+            if (this.IsUnsupportedSetConvertSource(item.ItemId, outfit.SetItemId))
+            {
+                continue;
+            }
+
+            if (!this.TryFindOutfitInventoryItem(outfit, item.ItemId, out sourceSlot))
+            {
+                continue;
+            }
+
+            sourceItem = item;
+            return true;
+        }
+
+        sourceItem = null!;
+        sourceSlot = default;
+        return false;
+    }
+
+    private bool HasSupportedSetConvertSource(OutfitCandidate candidate)
+    {
+        return candidate.IsMerge || candidate.SelectionItems.Any(item => !this.IsUnsupportedSetConvertSource(item.ItemId, candidate.SetItemId));
+    }
+
+    private int GetSetConvertSourceRank(uint itemId, uint setItemId)
+    {
+        var setItemIds = this.GetLookupSetItemIds(itemId);
+        if (setItemIds.Length <= 1)
+        {
+            return 0;
+        }
+
+        return setItemIds[0] == setItemId ? 1 : 2;
+    }
+
+    private uint[] GetLookupSetItemIds(uint itemId)
+    {
+        var lookupSheet = this.Services.DataManager.GetExcelSheet<MirageStoreSetItemLookup>();
+        return !lookupSheet.TryGetRow(itemId, out var lookupRow)
+            ? []
+            : lookupRow.Item
+                .Where(setItem => setItem.RowId != 0 && setItem.IsValid)
+                .Select(setItem => setItem.RowId)
+                .ToArray();
     }
 
     private void FillSetConvert(QueuedOutfit outfit)
@@ -758,7 +1314,11 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
                 return;
             }
 
-            this.FailQueue(error);
+            if (!this.TryRecoverFromSetConvertError(outfit, error))
+            {
+                this.FailQueue(error);
+            }
+
             return;
         }
 
@@ -791,7 +1351,11 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
 
         if (error != null)
         {
-            this.FailQueue(error);
+            if (!this.TryRecoverFromSetConvertError(outfit, error))
+            {
+                this.FailQueue(error);
+            }
+
             return;
         }
 
@@ -803,7 +1367,11 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
                 return;
             }
 
-            this.FailQueue(error);
+            if (!this.TryRecoverFromSetConvertError(outfit, error))
+            {
+                this.FailQueue(error);
+            }
+
             return;
         }
 
@@ -817,7 +1385,11 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
         {
             if (error != null)
             {
-                this.FailQueue(error);
+                if (!this.TryRecoverFromSetConvertError(outfit, error))
+                {
+                    this.FailQueue(error);
+                }
+
                 return;
             }
 
@@ -846,7 +1418,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
         if (!outfit.IsNativeAddendum
             && manager != null
             && manager->PrismBoxLoaded
-            && manager->PrismBoxItemIds.Contains(outfit.SetItemId))
+            && this.FindPrismBoxItemIndex(outfit.SetItemId) >= 0)
         {
             this.EnterStep(QueueStep.WaitingForStore, $"Waiting for {outfit.Name} to appear in the Glamour Dresser.");
             return;
@@ -903,7 +1475,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
             return;
         }
 
-        if (!manager->PrismBoxItemIds.Contains(outfit.SetItemId))
+        if (this.FindPrismBoxItemIndex(outfit.SetItemId) < 0)
         {
             this.nextActionAt = DateTimeOffset.UtcNow + CandidateRefreshDelay;
             return;
@@ -982,7 +1554,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
                 continue;
             }
 
-            if (!this.TryFindInventoryItem(item.ItemId, out var slot))
+            if (!this.TryFindOutfitInventoryItem(outfit, item.ItemId, out var slot))
             {
                 error = "Could not find one of the pieces to add in inventory.";
                 return false;
@@ -1031,9 +1603,29 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
             return false;
         }
 
-        if (!agent->Data->ItemSets.ToArray().Any(itemSet => itemSet.ItemId == outfit.SetItemId))
+        if (!agent->Data->ItemSets.ToArray().Any(itemSet => GetBaseItemId(itemSet.ItemId) == outfit.SetItemId))
         {
-            error = "Outfit creation opened for a different outfit, and the current outfit was not available for this item.";
+            if (outfit.CurrentSetConvertSourceItemId is { } sourceItemId)
+            {
+                this.unsupportedSetConvertSources.Add(new SetConvertSourceKey(sourceItemId, outfit.SetItemId));
+            }
+
+            var availableSetItemIds = agent->Data->ItemSets.ToArray()
+                .Select(itemSet => GetBaseItemId(itemSet.ItemId))
+                .Where(itemId => itemId != 0)
+                .ToArray();
+            this.Services.Log.Warning(
+                "Glamour Outfit Compactor could not use source item {SourceItemId} for {OutfitName} ({SetItemId}); available sets were {AvailableSetItemIds}",
+                outfit.CurrentSetConvertSourceItemId.GetValueOrDefault(),
+                outfit.Name,
+                outfit.SetItemId,
+                string.Join(", ", availableSetItemIds));
+            error = SetConvertTargetUnavailableError;
+            return false;
+        }
+
+        if (outfit.IsMerge && !this.TryPrepareStoredOutfitContext(outfit, agent, out error))
+        {
             return false;
         }
 
@@ -1075,11 +1667,53 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
         return true;
     }
 
+    private bool TryRecoverFromSetConvertError(QueuedOutfit outfit, string error)
+    {
+        if (!string.Equals(error, SetConvertTargetUnavailableError, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        if (this.HasAvailableSetConvertSource(outfit))
+        {
+            this.EnterStep(QueueStep.OpeningSetConvert, $"Trying another piece for {outfit.Name}.");
+            return true;
+        }
+
+        if (outfit.IsMerge && !outfit.StoredSetConvertOpenAttempted)
+        {
+            this.EnterStep(QueueStep.OpeningSetConvert, $"Trying the stored outfit for {outfit.Name}.");
+            return true;
+        }
+
+        this.SkipCurrentOutfit($"Skipped {outfit.Name}; the game did not offer that outfit for the available pieces.");
+        return true;
+    }
+
+    private bool HasAvailableSetConvertSource(QueuedOutfit outfit)
+    {
+        return outfit.SelectionItems.Any(item =>
+            !outfit.SetConvertSourceItemIdsTried.Contains(item.ItemId)
+            && !this.IsUnsupportedSetConvertSource(item.ItemId, outfit.SetItemId)
+            && this.TryFindOutfitInventoryItem(outfit, item.ItemId, out _));
+    }
+
+    private bool IsUnsupportedSetConvertSource(uint itemId, uint setItemId)
+    {
+        return this.unsupportedSetConvertSources.Contains(new SetConvertSourceKey(itemId, setItemId));
+    }
+
     private static void SetSetConvertItemSlotIndex(ref AgentMiragePrismPrismSetConvert.AgentData.ItemSetItem item, uint slotIndex)
     {
         // Current FFXIVClientStructs exposes SlotIndex as private; the generated layout places it at 0x08.
         var itemPtr = (byte*)Unsafe.AsPointer(ref item);
         *(uint*)(itemPtr + 8) = slotIndex;
+    }
+
+    private static uint GetSetConvertItemSlotIndex(ref AgentMiragePrismPrismSetConvert.AgentData.ItemSetItem item)
+    {
+        var itemPtr = (byte*)Unsafe.AsPointer(ref item);
+        return *(uint*)(itemPtr + 8);
     }
 
     private string GetSetConvertFillDiagnostic(QueuedOutfit outfit)
@@ -1182,7 +1816,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
                 return false;
             }
 
-            if (!this.TryFindInventoryItem(expectedItemId, out var slot))
+            if (!this.TryFindOutfitInventoryItem(outfit, expectedItemId, out var slot))
             {
                 error = "Could not find one of the selected pieces in inventory.";
                 return false;
@@ -1219,7 +1853,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
 
         var unitBase = (AtkUnitBase*)addon;
         outfit.AddendumPromptAttempts++;
-        var method = this.TryConfirmAddendumPrompt(unitBase, outfit.AddendumPromptAttempts);
+        var method = this.TryConfirmSelectYesNoPrompt(unitBase, outfit.AddendumPromptAttempts);
         if (method == null)
         {
             this.status = $"Waiting for the existing outfit prompt for {outfit.Name}.";
@@ -1244,7 +1878,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
         return true;
     }
 
-    private string? TryConfirmAddendumPrompt(AtkUnitBase* addon, int attempt)
+    private string? TryConfirmSelectYesNoPrompt(AtkUnitBase* addon, int attempt)
     {
         switch (attempt)
         {
@@ -1347,6 +1981,100 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
         return $"addonId={addon->Id}, values={addon->AtkValuesCount}, {yesDiagnostic}, prompt=\"{prompt}\"";
     }
 
+    private string GetContextMenuEntryTextDiagnostic(AtkUnitBase* addon, int entryCount)
+    {
+        var entries = new List<string>(entryCount);
+        for (var i = 0; i < entryCount; i++)
+        {
+            if (this.TryGetContextMenuEntryText(addon, i, out var text))
+            {
+                entries.Add($"{i}:\"{text}\"");
+            }
+        }
+
+        return $"[{string.Join("; ", entries)}]";
+    }
+
+    private bool TryFindContextMenuEntry(AtkUnitBase* addon, int entryCount, string expectedText, out int entryIndex)
+    {
+        var cappedEntryCount = Math.Min(entryCount, MaxContextMenuEntries);
+        for (var i = 0; i < cappedEntryCount; i++)
+        {
+            if (this.TryGetContextMenuEntryText(addon, i, out var text)
+                && string.Equals(text, expectedText, StringComparison.Ordinal))
+            {
+                entryIndex = i;
+                return true;
+            }
+        }
+
+        entryIndex = -1;
+        return false;
+    }
+
+    private bool TryGetContextMenuEntryText(AtkUnitBase* addon, int entryIndex, out string text)
+    {
+        var valueIndex = 8 + entryIndex;
+        if (addon->AtkValues == null || valueIndex < 0 || (uint)valueIndex >= addon->AtkValuesCount)
+        {
+            text = string.Empty;
+            return false;
+        }
+
+        text = NormalizeDiagnosticText(ReadAtkValueString(addon->AtkValues[valueIndex]));
+        return !string.IsNullOrWhiteSpace(text);
+    }
+
+    private static string GetAtkValuesDiagnostic(AtkUnitBase* addon)
+    {
+        if (addon == null)
+        {
+            return "addon=null";
+        }
+
+        if (addon->AtkValues == null)
+        {
+            return $"addonId={addon->Id}, values=null";
+        }
+
+        var valueCount = Math.Min((int)addon->AtkValuesCount, MaxDiagnosticAtkValues);
+        var values = new List<string>(valueCount);
+        for (var i = 0; i < valueCount; i++)
+        {
+            values.Add($"{i}:{FormatAtkValue(addon->AtkValues[i])}");
+        }
+
+        return $"addonId={addon->Id}, values={addon->AtkValuesCount}, firstValues=[{string.Join("; ", values)}]";
+    }
+
+    private static string FormatAtkValue(AtkValue value)
+    {
+        return value.Type switch
+        {
+            AtkValueType.Bool => $"Bool:{value.Bool}",
+            AtkValueType.Int => $"Int:{value.Int}",
+            AtkValueType.Int64 => $"Int64:{value.Int64}",
+            AtkValueType.UInt => $"UInt:{value.UInt}",
+            AtkValueType.UInt64 => $"UInt64:{value.UInt64}",
+            AtkValueType.Float => $"Float:{value.Float}",
+            AtkValueType.String or AtkValueType.String8 or AtkValueType.ManagedString or AtkValueType.WideString => $"String:\"{NormalizeDiagnosticText(ReadAtkValueString(value))}\"",
+            AtkValueType.Pointer => $"Pointer:0x{(nint)value.Pointer:X}",
+            AtkValueType.Null => "Null",
+            AtkValueType.Undefined => "Undefined",
+            _ => value.Type.ToString()
+        };
+    }
+
+    private static string NormalizeDiagnosticText(string text)
+    {
+        var normalized = NormalizePromptText(text)
+            .Replace("\n", " ", StringComparison.Ordinal)
+            .Trim();
+        return normalized.Length <= 96
+            ? normalized
+            : string.Concat(normalized.AsSpan(0, 96), "...");
+    }
+
     private bool TryValidateStoredOutfit(QueuedOutfit outfit, out string? error)
     {
         error = null;
@@ -1387,18 +2115,23 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
 
         if (!this.TryReadAtkUInt(addon, SetConvertUiItemCountOffset, out var itemCountValue))
         {
-            return false;
+            return this.TryReadSetConvertAgentItems(out items, out error);
         }
 
         var itemCount = (int)itemCountValue;
         if (itemCount <= 0)
         {
-            return false;
+            return this.TryReadSetConvertAgentItems(out items, out error);
         }
 
         var requiredValueCount = SetConvertUiItemsOffset + (itemCount * SetConvertUiItemStride);
         if (addon->AtkValuesCount < requiredValueCount)
         {
+            if (this.TryReadSetConvertAgentItems(out items, out error))
+            {
+                return true;
+            }
+
             error = "Outfit creation data is still loading.";
             return false;
         }
@@ -1421,14 +2154,62 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
                 || !this.TryReadAtkUInt(addon, offset + 5, out var slot)
                 || !this.TryReadAtkUInt(addon, offset + 6, out var flag))
             {
+                if (this.TryReadSetConvertAgentItems(out items, out error))
+                {
+                    return true;
+                }
+
                 error = "Could not read one of the outfit creation rows.";
                 return false;
             }
 
-            readItems.Add(new SetConvertUiItem(i, itemId, inventoryType, slot, flag));
+            readItems.Add(new SetConvertUiItem(i, GetBaseItemId(itemId), inventoryType, slot, flag));
         }
 
         items = readItems.ToArray();
+        return items.Length > 0 || this.TryReadSetConvertAgentItems(out items, out error);
+    }
+
+    private bool TryReadSetConvertAgentItems(out SetConvertUiItem[] items, out string? error)
+    {
+        items = [];
+        error = null;
+
+        var agent = AgentMiragePrismPrismSetConvert.Instance();
+        if (agent == null || agent->Data == null)
+        {
+            error = "Outfit creation data is still loading.";
+            return false;
+        }
+
+        var agentItems = agent->Data->Items;
+        var itemLimit = agentItems.Length;
+        var declaredItemCount = (int)agent->Data->NumItemsInSet;
+        if (declaredItemCount > 0)
+        {
+            itemLimit = Math.Min(declaredItemCount, agentItems.Length);
+        }
+
+        var readItems = new List<SetConvertUiItem>(itemLimit);
+        for (var i = 0; i < itemLimit; i++)
+        {
+            var item = agentItems[i];
+            if (item.ItemId == 0)
+            {
+                continue;
+            }
+
+            var slotIndex = GetSetConvertItemSlotIndex(ref item);
+            readItems.Add(new SetConvertUiItem(i, GetBaseItemId(item.ItemId), (uint)item.InventoryType, item.Slot, slotIndex));
+        }
+
+        items = readItems.ToArray();
+        if (items.Length == 0)
+        {
+            error = "Outfit creation data is still loading.";
+            return false;
+        }
+
         return true;
     }
 
@@ -1569,10 +2350,18 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
     private void ResetQueue(string message)
     {
         this.queue.Clear();
+        this.duplicateQueue.Clear();
         this.currentOutfit = null;
+        this.currentDuplicateItem = null;
         this.completedOutfits = 0;
         this.skippedOutfits = 0;
+        this.completedDuplicateItems = 0;
+        this.skippedDuplicateItems = 0;
+        this.totalQueuedOutfits = 0;
+        this.totalQueuedDuplicateItems = 0;
         this.waitingForRestoredItemId = null;
+        this.waitingForDuplicateItemKey = null;
+        this.waitingForDuplicateInventoryCount = 0;
         this.ClearRestoreRetryState();
         this.pendingSetConvertSlot = null;
         this.pendingSetConvertItemId = null;
@@ -1588,7 +2377,12 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
     private void FailQueue(string error)
     {
         this.queue.Clear();
+        this.duplicateQueue.Clear();
+        this.currentOutfit = null;
+        this.currentDuplicateItem = null;
         this.waitingForRestoredItemId = null;
+        this.waitingForDuplicateItemKey = null;
+        this.waitingForDuplicateInventoryCount = 0;
         this.ClearRestoreRetryState();
         this.pendingSetConvertSlot = null;
         this.pendingSetConvertItemId = null;
@@ -1636,6 +2430,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
     private void RebuildCandidates()
     {
         this.candidates.Clear();
+        this.duplicateCandidates.Clear();
 
         var manager = MirageManager.Instance();
         if (manager == null || !manager->PrismBoxLoaded)
@@ -1651,21 +2446,38 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
 
         this.lastPrismBoxItemIds = manager->PrismBoxItemIds.ToArray();
 
-        var itemIndexes = new Dictionary<uint, int>();
+        var itemIndexes = new Dictionary<uint, PrismBoxCandidateItem>();
         var inventoryItems = this.GetInventoryCandidateItems();
         var setSheet = this.Services.DataManager.GetExcelSheet<MirageStoreSetItem>();
         var lookupSheet = this.Services.DataManager.GetExcelSheet<MirageStoreSetItemLookup>();
         var itemSheet = this.Services.DataManager.GetExcelSheet<Item>();
+        var outfitSetItemIds = setSheet.Select(row => row.RowId).Where(rowId => rowId != 0).ToHashSet();
 
         for (var i = 0; i < this.lastPrismBoxItemIds.Length; i++)
         {
-            var itemId = this.lastPrismBoxItemIds[i];
+            var rawItemId = this.lastPrismBoxItemIds[i];
+            var itemId = GetBaseItemId(rawItemId);
             if (itemId == 0)
             {
                 continue;
             }
 
-            itemIndexes.TryAdd(itemId, i);
+            if (IsHighQualityItem(rawItemId))
+            {
+                continue;
+            }
+
+            if (itemIndexes.ContainsKey(itemId))
+            {
+                continue;
+            }
+
+            itemIndexes[itemId] = new PrismBoxCandidateItem(i);
+        }
+
+        if (this.RestoreDuplicateItems)
+        {
+            this.RebuildDuplicateCandidates(manager, itemSheet, outfitSetItemIds);
         }
 
         var rawCandidates = new List<OutfitCandidate>();
@@ -1715,7 +2527,12 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
                 var setItemIds = setSlots.Select(slot => slot.ItemId).ToArray();
                 var rowIdIsSetPiece = setItemIds.Contains(setItemId);
                 var storedSetIndex = -1;
-                var hasStoredOutfit = !rowIdIsSetPiece && itemIndexes.TryGetValue(setItemId, out storedSetIndex);
+                var hasStoredOutfit = false;
+                if (!rowIdIsSetPiece && itemIndexes.TryGetValue(setItemId, out var storedSetItem))
+                {
+                    hasStoredOutfit = true;
+                    storedSetIndex = storedSetItem.Index;
+                }
                 var selectionItems = new List<CandidateItem>();
                 var restoreItems = new List<CandidateItem>();
                 var inventoryItemIds = new List<uint>();
@@ -1767,6 +2584,11 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
                     storedSlotIndexes.ToArray(),
                     storedSetItemIds.ToArray(),
                     selectionItems.Any(item => item.Dyed));
+                if (!this.HasSupportedSetConvertSource(candidate))
+                {
+                    continue;
+                }
+
                 if (!this.ShouldIncludeCandidate(candidate))
                 {
                     continue;
@@ -1782,6 +2604,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
             .ThenByDescending(candidate => candidate.IsMerge)
             .ThenByDescending(candidate => candidate.SelectionItems.Count + candidate.StoredSetItemIds.Length)
             .ThenByDescending(candidate => candidate.SelectionItems.Count)
+            .ThenBy(candidate => candidate.SelectionItems.Min(item => this.GetSetConvertSourceRank(item.ItemId, candidate.SetItemId)))
             .ThenBy(candidate => candidate.Name, StringComparer.OrdinalIgnoreCase)
             .ThenBy(candidate => candidate.SetItemId))
         {
@@ -1806,7 +2629,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
 
         if (this.step == QueueStep.Idle)
         {
-            if (this.candidates.Count == 0)
+            if (this.candidates.Count == 0 && this.duplicateCandidates.Count == 0)
             {
                 this.status = "No Glamour Dresser slots to clean up.";
             }
@@ -1817,28 +2640,94 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
         }
     }
 
+    private void RebuildDuplicateCandidates(MirageManager* manager, Lumina.Excel.ExcelSheet<Item> itemSheet, HashSet<uint> outfitSetItemIds)
+    {
+        var duplicateGroups = new Dictionary<DuplicateItemKey, int>();
+        for (var i = 0; i < this.lastPrismBoxItemIds.Length; i++)
+        {
+            var rawItemId = this.lastPrismBoxItemIds[i];
+            var itemId = GetBaseItemId(rawItemId);
+            if (itemId == 0 || IsHighQualityItem(rawItemId) || outfitSetItemIds.Contains(itemId))
+            {
+                continue;
+            }
+
+            var key = new DuplicateItemKey(itemId, manager->PrismBoxStain0Ids[i], manager->PrismBoxStain1Ids[i]);
+            duplicateGroups.TryGetValue(key, out var count);
+            duplicateGroups[key] = count + 1;
+        }
+
+        foreach (var group in duplicateGroups
+            .Where(group => group.Value > 1)
+            .OrderBy(group => this.GetDuplicateItemName(group.Key.ItemId, itemSheet), StringComparer.OrdinalIgnoreCase)
+            .ThenBy(group => group.Key.ItemId)
+            .ThenBy(group => group.Key.Stain0Id)
+            .ThenBy(group => group.Key.Stain1Id))
+        {
+            this.duplicateCandidates.Add(new DuplicateItemCandidate(
+                group.Key,
+                this.GetDuplicateItemName(group.Key.ItemId, itemSheet),
+                group.Value - 1));
+        }
+    }
+
+    private List<QueuedDuplicateItem> CreateDuplicateCleanupQueue()
+    {
+        var items = new List<QueuedDuplicateItem>();
+        foreach (var candidate in this.duplicateCandidates)
+        {
+            for (var i = 0; i < candidate.DuplicatesToRestore; i++)
+            {
+                items.Add(new QueuedDuplicateItem(candidate.Key, candidate.Name));
+            }
+        }
+
+        return items;
+    }
+
+    private string GetDuplicateItemName(uint itemId, Lumina.Excel.ExcelSheet<Item> itemSheet)
+    {
+        if (!itemSheet.TryGetRow(itemId, out var itemRow))
+        {
+            return $"item {itemId}";
+        }
+
+        var name = itemRow.Name.ToString();
+        return string.IsNullOrWhiteSpace(name)
+            ? $"item {itemId}"
+            : name;
+    }
+
     private string GetCandidateSummary()
     {
         var totalUpdates = this.candidates.Count;
+        var totalDuplicatesToRestore = this.duplicateCandidates.Sum(candidate => candidate.DuplicatesToRestore);
         var totalSlotSavings = this.candidates.Where(candidate => candidate.GlamourDresserSlotsSaved > 0).Sum(candidate => candidate.GlamourDresserSlotsSaved);
         var slotUsingInventoryOutfitCount = this.candidates.Count(candidate => candidate.GlamourDresserSlotsSaved < 0 && candidate.IsNewOutfitUsingInventory);
+        var duplicateSummary = totalDuplicatesToRestore > 0
+            ? $" {totalDuplicatesToRestore} duplicate dresser item{(totalDuplicatesToRestore == 1 ? string.Empty : "s")} can be restored to inventory."
+            : string.Empty;
+        if (totalUpdates == 0)
+        {
+            return duplicateSummary.TrimStart();
+        }
 
         if (totalSlotSavings > 0 && slotUsingInventoryOutfitCount > 0)
         {
-            return $"{totalUpdates} outfit update{(totalUpdates == 1 ? string.Empty : "s")} available. {totalSlotSavings} Glamour Dresser slot{(totalSlotSavings == 1 ? string.Empty : "s")} can be freed; {slotUsingInventoryOutfitCount} new inventory outfit{(slotUsingInventoryOutfitCount == 1 ? string.Empty : "s")} will use a slot.";
+            return $"{totalUpdates} outfit update{(totalUpdates == 1 ? string.Empty : "s")} available. {totalSlotSavings} Glamour Dresser slot{(totalSlotSavings == 1 ? string.Empty : "s")} can be freed; {slotUsingInventoryOutfitCount} new inventory outfit{(slotUsingInventoryOutfitCount == 1 ? string.Empty : "s")} will use a slot.{duplicateSummary}";
         }
 
         if (totalSlotSavings > 0)
         {
-            return $"{totalUpdates} outfit update{(totalUpdates == 1 ? string.Empty : "s")} can free {totalSlotSavings} Glamour Dresser slot{(totalSlotSavings == 1 ? string.Empty : "s")}.";
+            return $"{totalUpdates} outfit update{(totalUpdates == 1 ? string.Empty : "s")} can free {totalSlotSavings} Glamour Dresser slot{(totalSlotSavings == 1 ? string.Empty : "s")}.{duplicateSummary}";
         }
 
         if (slotUsingInventoryOutfitCount > 0)
         {
-            return $"{slotUsingInventoryOutfitCount} inventory outfit{(slotUsingInventoryOutfitCount == 1 ? string.Empty : "s")} can be created.";
+            return $"{slotUsingInventoryOutfitCount} inventory outfit{(slotUsingInventoryOutfitCount == 1 ? string.Empty : "s")} can be created.{duplicateSummary}";
         }
 
-        return $"{totalUpdates} outfit update{(totalUpdates == 1 ? string.Empty : "s")} available without using more Glamour Dresser slots.";
+        return $"{totalUpdates} outfit update{(totalUpdates == 1 ? string.Empty : "s")} available without using more Glamour Dresser slots.{duplicateSummary}";
     }
 
     private bool ShouldIncludeCandidate(OutfitCandidate candidate)
@@ -1861,14 +2750,15 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
         };
     }
 
-    private bool TryCreateCandidateItem(uint itemId, Dictionary<uint, int> itemIndexes, MirageManager* manager, out CandidateItem? item)
+    private bool TryCreateCandidateItem(uint itemId, Dictionary<uint, PrismBoxCandidateItem> itemIndexes, MirageManager* manager, out CandidateItem? item)
     {
         item = null;
-        if (itemId == 0 || !itemIndexes.TryGetValue(itemId, out var index))
+        if (itemId == 0 || !itemIndexes.TryGetValue(itemId, out var prismBoxItem))
         {
             return false;
         }
 
+        var index = prismBoxItem.Index;
         var dyed = manager->PrismBoxStain0Ids[index] != 0 || manager->PrismBoxStain1Ids[index] != 0;
         item = new CandidateItem(itemId, dyed);
         return true;
@@ -1883,9 +2773,8 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
             return items;
         }
 
-        for (var inventoryTypeValue = (int)InventoryType.Inventory1; inventoryTypeValue <= (int)InventoryType.Inventory4; inventoryTypeValue++)
+        foreach (var inventoryType in InventoryBagTypes)
         {
-            var inventoryType = (InventoryType)inventoryTypeValue;
             var container = inventoryManager->GetInventoryContainer(inventoryType);
             if (container == null)
             {
@@ -1900,14 +2789,25 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
                     continue;
                 }
 
-                var itemId = inventorySlot->GetItemId();
-                if (itemId == 0 || items.ContainsKey(itemId))
+                var rawItemId = inventorySlot->GetItemId();
+                var itemId = GetBaseItemId(rawItemId);
+                if (itemId == 0)
+                {
+                    continue;
+                }
+
+                if (IsHighQualityItem(rawItemId))
+                {
+                    continue;
+                }
+
+                if (items.ContainsKey(itemId))
                 {
                     continue;
                 }
 
                 var dyed = inventorySlot->GetStain(0) != 0 || inventorySlot->GetStain(1) != 0;
-                items.Add(itemId, new CandidateItem(itemId, dyed));
+                items[itemId] = new CandidateItem(itemId, dyed);
             }
         }
 
@@ -1951,12 +2851,63 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
             || !manager->PrismBoxItemIds.SequenceEqual(this.lastPrismBoxItemIds);
     }
 
-    private int FindPrismBoxItemIndex(uint itemId)
+    private int FindPrismBoxItemIndex(uint itemId, ItemQualityRequirement quality = ItemQualityRequirement.Normal)
     {
         var manager = MirageManager.Instance();
-        return manager == null || !manager->PrismBoxLoaded
-            ? -1
-            : manager->PrismBoxItemIds.IndexOf(itemId);
+        if (manager == null || !manager->PrismBoxLoaded)
+        {
+            return -1;
+        }
+
+        for (var i = 0; i < manager->PrismBoxItemIds.Length; i++)
+        {
+            var rawItemId = manager->PrismBoxItemIds[i];
+            if (GetBaseItemId(rawItemId) == itemId && MatchesQuality(rawItemId, quality))
+            {
+                return i;
+            }
+        }
+
+        return -1;
+    }
+
+    private int FindPrismBoxItemIndex(DuplicateItemKey key)
+    {
+        var manager = MirageManager.Instance();
+        if (manager == null || !manager->PrismBoxLoaded)
+        {
+            return -1;
+        }
+
+        for (var i = 0; i < manager->PrismBoxItemIds.Length; i++)
+        {
+            if (MatchesDuplicateKey(manager->PrismBoxItemIds[i], manager->PrismBoxStain0Ids[i], manager->PrismBoxStain1Ids[i], key))
+            {
+                return i;
+            }
+        }
+
+        return -1;
+    }
+
+    private int CountPrismBoxItems(DuplicateItemKey key)
+    {
+        var manager = MirageManager.Instance();
+        if (manager == null || !manager->PrismBoxLoaded)
+        {
+            return 0;
+        }
+
+        var count = 0;
+        for (var i = 0; i < manager->PrismBoxItemIds.Length; i++)
+        {
+            if (MatchesDuplicateKey(manager->PrismBoxItemIds[i], manager->PrismBoxStain0Ids[i], manager->PrismBoxStain1Ids[i], key))
+            {
+                count++;
+            }
+        }
+
+        return count;
     }
 
     private bool HasStartedRestoring(QueuedOutfit outfit)
@@ -2001,7 +2952,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
 
     private bool HasEnoughInventorySpaceForOutfit(QueuedOutfit outfit, out int neededSlots, out int availableSlots)
     {
-        neededSlots = outfit.SelectionItems.Count(item => !this.TryFindInventoryItem(item.ItemId, out _));
+        neededSlots = outfit.RestoreItems.Count;
         availableSlots = this.CountAvailableInventorySlots();
 
         return availableSlots >= neededSlots;
@@ -2016,9 +2967,8 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
         }
 
         var availableSlots = 0;
-        for (var inventoryTypeValue = (int)InventoryType.Inventory1; inventoryTypeValue <= (int)InventoryType.Inventory4; inventoryTypeValue++)
+        foreach (var inventoryType in InventoryBagTypes)
         {
-            var inventoryType = (InventoryType)inventoryTypeValue;
             var container = inventoryManager->GetInventoryContainer(inventoryType);
             if (container == null)
             {
@@ -2047,9 +2997,8 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
         }
 
         var itemCount = 0;
-        for (var inventoryTypeValue = (int)InventoryType.Inventory1; inventoryTypeValue <= (int)InventoryType.Inventory4; inventoryTypeValue++)
+        foreach (var inventoryType in InventoryBagTypes)
         {
-            var inventoryType = (InventoryType)inventoryTypeValue;
             var container = inventoryManager->GetInventoryContainer(inventoryType);
             if (container == null)
             {
@@ -2069,18 +3018,17 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
         return itemCount;
     }
 
-    private bool TryFindInventoryItem(uint itemId, out InventorySlot slot)
+    private int CountInventoryBagItems(DuplicateItemKey key)
     {
         var inventoryManager = InventoryManager.Instance();
         if (inventoryManager == null)
         {
-            slot = default;
-            return false;
+            return 0;
         }
 
-        for (var inventoryTypeValue = (int)InventoryType.Inventory1; inventoryTypeValue <= (int)InventoryType.Inventory4; inventoryTypeValue++)
+        var itemCount = 0;
+        foreach (var inventoryType in InventoryBagTypes)
         {
-            var inventoryType = (InventoryType)inventoryTypeValue;
             var container = inventoryManager->GetInventoryContainer(inventoryType);
             if (container == null)
             {
@@ -2090,18 +3038,143 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
             for (var slotIndex = 0; slotIndex < container->GetSize(); slotIndex++)
             {
                 var inventorySlot = container->GetInventorySlot(slotIndex);
-                if (inventorySlot == null || inventorySlot->GetItemId() != itemId)
+                if (inventorySlot == null)
                 {
                     continue;
                 }
 
-                slot = new InventorySlot(itemId, inventorySlot->GetInventoryType(), inventorySlot->GetSlot());
+                if (MatchesDuplicateKey(inventorySlot->GetItemId(), inventorySlot->GetStain(0), inventorySlot->GetStain(1), key))
+                {
+                    itemCount++;
+                }
+            }
+        }
+
+        return itemCount;
+    }
+
+    private bool TryFindInventoryItem(uint itemId, out InventorySlot slot)
+    {
+        return this.TryFindInventoryItem(itemId, ItemQualityRequirement.Normal, out slot);
+    }
+
+    private bool TryFindInventoryBagItem(uint itemId, out InventorySlot slot)
+    {
+        return this.TryFindInventoryBagItem(itemId, ItemQualityRequirement.Normal, out slot);
+    }
+
+    private bool TryFindInventoryBagItem(CandidateItem item, out InventorySlot slot)
+    {
+        return this.TryFindInventoryBagItem(item.ItemId, out slot);
+    }
+
+    private bool TryFindInventoryItem(uint itemId, ItemQualityRequirement quality, out InventorySlot slot)
+    {
+        return this.TryFindInventoryItem(itemId, InventoryBagTypes, quality, out slot);
+    }
+
+    private bool TryFindInventoryBagItem(uint itemId, ItemQualityRequirement quality, out InventorySlot slot)
+    {
+        return this.TryFindInventoryItem(itemId, InventoryBagTypes, quality, out slot);
+    }
+
+    private bool TryFindInventoryItem(uint itemId, IReadOnlyList<InventoryType> inventoryTypes, out InventorySlot slot)
+    {
+        return this.TryFindInventoryItem(itemId, inventoryTypes, ItemQualityRequirement.Normal, out slot);
+    }
+
+    private bool TryFindInventoryItem(uint itemId, IReadOnlyList<InventoryType> inventoryTypes, ItemQualityRequirement quality, out InventorySlot slot)
+    {
+        var inventoryManager = InventoryManager.Instance();
+        if (inventoryManager == null)
+        {
+            slot = default;
+            return false;
+        }
+
+        foreach (var inventoryType in inventoryTypes)
+        {
+            var container = inventoryManager->GetInventoryContainer(inventoryType);
+            if (container == null)
+            {
+                continue;
+            }
+
+            for (var slotIndex = 0; slotIndex < container->GetSize(); slotIndex++)
+            {
+                var inventorySlot = container->GetInventorySlot(slotIndex);
+                if (inventorySlot == null)
+                {
+                    continue;
+                }
+
+                var rawItemId = inventorySlot->GetItemId();
+                if (GetBaseItemId(rawItemId) != itemId || !MatchesQuality(rawItemId, quality))
+                {
+                    continue;
+                }
+
+                slot = new InventorySlot(rawItemId, inventorySlot->GetInventoryType(), inventorySlot->GetSlot());
                 return true;
             }
         }
 
         slot = default;
         return false;
+    }
+
+    private bool TryFindOutfitInventoryItem(QueuedOutfit outfit, uint itemId, out InventorySlot slot)
+    {
+        return this.TryFindOutfitInventoryItem(outfit, itemId, ItemQualityRequirement.Normal, out slot);
+    }
+
+    private bool TryFindOutfitInventoryItem(QueuedOutfit outfit, uint itemId, ItemQualityRequirement quality, out InventorySlot slot)
+    {
+        foreach (var restoredSlot in outfit.RestoredSlots)
+        {
+            if (!this.TryGetInventoryRawItemId(restoredSlot, out var rawItemId)
+                || GetBaseItemId(rawItemId) != itemId
+                || !MatchesQuality(rawItemId, quality))
+            {
+                continue;
+            }
+
+            slot = new InventorySlot(rawItemId, restoredSlot.InventoryType, restoredSlot.Slot);
+            return true;
+        }
+
+        return this.TryFindInventoryItem(itemId, quality, out slot);
+    }
+
+    private bool TryGetInventoryItemPointer(InventorySlot slot, out InventoryItem* inventoryItem)
+    {
+        inventoryItem = null;
+        var inventoryManager = InventoryManager.Instance();
+        if (inventoryManager == null)
+        {
+            return false;
+        }
+
+        var container = inventoryManager->GetInventoryContainer(slot.InventoryType);
+        if (container == null || slot.Slot >= container->GetSize())
+        {
+            return false;
+        }
+
+        inventoryItem = container->GetInventorySlot((int)slot.Slot);
+        return inventoryItem != null && inventoryItem->GetItemId() != 0;
+    }
+
+    private bool TryGetInventoryRawItemId(InventorySlot slot, out uint rawItemId)
+    {
+        if (!this.TryGetInventoryItemPointer(slot, out var inventoryItem))
+        {
+            rawItemId = 0;
+            return false;
+        }
+
+        rawItemId = inventoryItem->GetItemId();
+        return true;
     }
 
     private bool IsInventorySlotConsumed(InventorySlot slot)
@@ -2119,7 +3192,32 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
         }
 
         var inventorySlot = container->GetInventorySlot((int)slot.Slot);
-        return inventorySlot != null && inventorySlot->GetItemId() != slot.ItemId;
+        return inventorySlot != null && inventorySlot->GetItemId() != slot.RawItemId;
+    }
+
+    private static uint GetBaseItemId(uint itemId)
+    {
+        return itemId == 0
+            ? 0
+            : ItemUtil.GetBaseId(itemId).ItemId;
+    }
+
+    private static bool IsHighQualityItem(uint itemId)
+    {
+        return itemId != 0 && ItemUtil.IsHighQuality(itemId);
+    }
+
+    private static bool MatchesQuality(uint itemId, ItemQualityRequirement quality)
+    {
+        return quality == ItemQualityRequirement.Normal && !IsHighQualityItem(itemId);
+    }
+
+    private static bool MatchesDuplicateKey(uint rawItemId, byte stain0Id, byte stain1Id, DuplicateItemKey key)
+    {
+        return GetBaseItemId(rawItemId) == key.ItemId
+            && !IsHighQualityItem(rawItemId)
+            && stain0Id == key.Stain0Id
+            && stain1Id == key.Stain1Id;
     }
 
     private bool IsDresserOpen()
@@ -2341,9 +3439,12 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
         return queueStep switch
         {
             QueueStep.WaitingForDyedConfirmation => "waiting for dyed outfit confirmation",
+            QueueStep.RestoringDuplicateItem => "restoring duplicate items",
+            QueueStep.WaitingForDuplicateRestore => "waiting for duplicate item restore",
             QueueStep.RestoringItems => "restoring outfit pieces",
             QueueStep.WaitingForRestore => "waiting for inventory updates",
             QueueStep.OpeningSetConvert => "opening outfit creation",
+            QueueStep.WaitingForSetConvertOpen => "waiting for outfit creation to open",
             QueueStep.FillingSetConvert => "selecting outfit pieces",
             QueueStep.ValidatingSetConvert => "checking selected outfit pieces",
             QueueStep.StoringOutfit => "storing the outfit",
@@ -2370,13 +3471,21 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
         PartialAndFullSets
     }
 
+    private enum ItemQualityRequirement
+    {
+        Normal
+    }
+
     private enum QueueStep
     {
         Idle,
         WaitingForDyedConfirmation,
+        RestoringDuplicateItem,
+        WaitingForDuplicateRestore,
         RestoringItems,
         WaitingForRestore,
         OpeningSetConvert,
+        WaitingForSetConvertOpen,
         FillingSetConvert,
         ValidatingSetConvert,
         StoringOutfit,
@@ -2460,7 +3569,10 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
         public bool IsMerge => this.StoredSlotIndexes.Length > 0;
         public bool IsNativeAddendum => this.IsMerge || this.NativeAddendumAccepted;
         public List<InventorySlot> RestoredSlots { get; } = [];
+        public HashSet<uint> SetConvertSourceItemIdsTried { get; } = [];
+        public uint? CurrentSetConvertSourceItemId { get; set; }
         public int NextRestoreIndex { get; set; }
+        public bool StoredSetConvertOpenAttempted { get; set; }
         public bool SetConvertOutfitSwitchAttempted { get; set; }
         public int AddendumPromptAttempts { get; set; }
         public bool NativeAddendumAccepted { get; set; }
@@ -2478,6 +3590,73 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
         public bool Dyed { get; }
     }
 
+    private sealed class DuplicateItemCandidate
+    {
+        public DuplicateItemCandidate(DuplicateItemKey key, string name, int duplicatesToRestore)
+        {
+            this.Key = key;
+            this.Name = name;
+            this.DuplicatesToRestore = duplicatesToRestore;
+        }
+
+        public DuplicateItemKey Key { get; }
+        public string Name { get; }
+        public int DuplicatesToRestore { get; }
+    }
+
+    private sealed class QueuedDuplicateItem
+    {
+        public QueuedDuplicateItem(DuplicateItemKey key, string name)
+        {
+            this.Key = key;
+            this.Name = name;
+        }
+
+        public DuplicateItemKey Key { get; }
+        public string Name { get; }
+    }
+
+    private readonly struct DuplicateItemKey : IEquatable<DuplicateItemKey>
+    {
+        public DuplicateItemKey(uint itemId, byte stain0Id, byte stain1Id)
+        {
+            this.ItemId = itemId;
+            this.Stain0Id = stain0Id;
+            this.Stain1Id = stain1Id;
+        }
+
+        public uint ItemId { get; }
+        public byte Stain0Id { get; }
+        public byte Stain1Id { get; }
+
+        public bool Equals(DuplicateItemKey other)
+        {
+            return this.ItemId == other.ItemId
+                && this.Stain0Id == other.Stain0Id
+                && this.Stain1Id == other.Stain1Id;
+        }
+
+        public override bool Equals(object? obj)
+        {
+            return obj is DuplicateItemKey other && this.Equals(other);
+        }
+
+        public override int GetHashCode()
+        {
+            return HashCode.Combine(this.ItemId, this.Stain0Id, this.Stain1Id);
+        }
+    }
+
+    private readonly struct PrismBoxCandidateItem
+    {
+        public PrismBoxCandidateItem(int index)
+        {
+            this.Index = index;
+        }
+
+        public int Index { get; }
+    }
+
     private readonly struct SetItemSlot
     {
         public SetItemSlot(int slotIndex, uint itemId)
@@ -2492,17 +3671,19 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
 
     private readonly struct InventorySlot
     {
-        public InventorySlot(uint itemId, InventoryType inventoryType, uint slot)
+        public InventorySlot(uint rawItemId, InventoryType inventoryType, uint slot)
         {
-            this.ItemId = itemId;
+            this.RawItemId = rawItemId;
             this.InventoryType = inventoryType;
             this.Slot = slot;
         }
 
-        public uint ItemId { get; }
+        public uint RawItemId { get; }
         public InventoryType InventoryType { get; }
         public uint Slot { get; }
     }
+
+    private readonly record struct SetConvertSourceKey(uint ItemId, uint SetItemId);
 
     private readonly struct SetConvertUiItem
     {

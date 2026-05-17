@@ -1,8 +1,8 @@
 {
   "Author": "xeltor",
   "Name": "XelsTweaks",
-  "Punchline": "A modular collection of small quality-of-life tweaks.",
-  "Description": "A modular Dalamud tweak hub for small opt-in quality-of-life features.",
+  "Punchline": "For when staring at frustrations angrily doesn't resolve them!",
+  "Description": "A modular Dalamud tweak hub for opt-in interface and utility fixes.",
   "InternalName": "XelsTweaks",
   "DalamudApiLevel": "15",
   "MinimumDalamudVersion": "15.0.0.0",
