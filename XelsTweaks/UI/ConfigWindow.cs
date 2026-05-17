@@ -6,6 +6,7 @@ using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.Textures;
 using Dalamud.Interface.Windowing;
 using Dalamud.Plugin.Services;
+using Dalamud.Utility;
 
 namespace XelsTweaks.UI;
 
@@ -28,6 +29,7 @@ internal sealed class ConfigWindow : Window, IDisposable
     private static readonly Vector4 SidebarBackgroundColor = new(1.0f, 1.0f, 1.0f, 0.045f);
     private static readonly Vector4 EnabledColor = new(0.48f, 0.95f, 0.56f, 1.0f);
     private static readonly Vector4 DisabledColor = new(0.58f, 0.58f, 0.62f, 1.0f);
+    private static readonly Vector4 RequirementColor = new(1.0f, 0.28f, 0.28f, 1.0f);
     private static readonly Vector4 WarningColor = new(1.0f, 0.74f, 0.25f, 1.0f);
     private static readonly Vector4 ErrorColor = new(1.0f, 0.35f, 0.35f, 1.0f);
 
@@ -157,6 +159,7 @@ internal sealed class ConfigWindow : Window, IDisposable
     private void DrawTweakListItem(TweakBase tweak)
     {
         ImGui.PushID(tweak.Id);
+        this.tweakManager.RefreshRequirementState(tweak);
 
         var rowHeight = MathF.Max(TweakRowMinHeight, ImGui.GetFrameHeight());
         if (ImGui.BeginTable("##tweak_row", 2, ImGuiTableFlags.NoSavedSettings | ImGuiTableFlags.SizingFixedFit, new Vector2(0f, rowHeight)))
@@ -169,16 +172,32 @@ internal sealed class ConfigWindow : Window, IDisposable
             var checkboxOffset = MathF.Max(0f, (rowHeight - ImGui.GetFrameHeight()) * 0.5f);
             ImGui.SetCursorPosY(ImGui.GetCursorPosY() + checkboxOffset);
             var enabled = tweak.IsEnabled;
+            var requirementMet = tweak.IsRequirementMet;
+            if (!requirementMet)
+            {
+                ImGui.BeginDisabled();
+            }
+
             if (ImGui.Checkbox("##enabled", ref enabled))
             {
                 this.tweakManager.SetEnabled(tweak, enabled);
+            }
+
+            if (!requirementMet)
+            {
+                ImGui.EndDisabled();
             }
 
             ImGui.TableSetColumnIndex(1);
 
             var selected = this.selectedTweak == tweak;
             var textColorPushed = false;
-            if (tweak.LastError != null)
+            if (!requirementMet)
+            {
+                ImGui.PushStyleColor(ImGuiCol.Text, RequirementColor);
+                textColorPushed = true;
+            }
+            else if (tweak.LastError != null)
             {
                 ImGui.PushStyleColor(ImGuiCol.Text, ErrorColor);
                 textColorPushed = true;
@@ -257,6 +276,7 @@ internal sealed class ConfigWindow : Window, IDisposable
 
     private void DrawSelectedTweak(TweakBase tweak)
     {
+        this.tweakManager.RefreshRequirementState(tweak);
         this.DrawTweakHeader(tweak);
         ImGui.Spacing();
         ImGui.TextWrapped(tweak.Description);
@@ -296,6 +316,19 @@ internal sealed class ConfigWindow : Window, IDisposable
         }
 
         ImGui.TextColored(statusColor, statusText);
+        if (!tweak.IsRequirementMet && tweak.Requirement is { } requirement)
+        {
+            if (ImGui.IsItemHovered())
+            {
+                ImGui.SetMouseCursor(ImGuiMouseCursor.Hand);
+            }
+
+            if (ImGui.IsItemClicked())
+            {
+                Util.OpenLink(requirement.RepositoryUrl);
+            }
+        }
+
         ImGui.TextDisabled($"{tweak.Id} - {FormatCategoryName(tweak.Category)}");
         ImGui.Separator();
     }
@@ -316,6 +349,11 @@ internal sealed class ConfigWindow : Window, IDisposable
 
     private static string GetStatusText(TweakBase tweak)
     {
+        if (!tweak.IsRequirementMet && tweak.Requirement is { } requirement)
+        {
+            return $"Required: {requirement.PluginName}";
+        }
+
         if (tweak.LastError != null)
         {
             return "Error";
@@ -326,6 +364,11 @@ internal sealed class ConfigWindow : Window, IDisposable
 
     private static Vector4 GetStatusColor(TweakBase tweak)
     {
+        if (!tweak.IsRequirementMet)
+        {
+            return RequirementColor;
+        }
+
         if (tweak.LastError != null)
         {
             return ErrorColor;

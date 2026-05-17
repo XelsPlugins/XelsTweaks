@@ -148,6 +148,12 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
 
+        if (enabled && !tweak.IsRequirementMet && tweak.Requirement is { } requirement)
+        {
+            this.Print($"{tweak.Name} requires {requirement.PluginName}.");
+            return;
+        }
+
         this.tweakManager.SetEnabled(tweak, enabled);
         this.Print($"{tweak.Name} is {(tweak.IsEnabled ? "enabled" : "disabled")}.");
     }

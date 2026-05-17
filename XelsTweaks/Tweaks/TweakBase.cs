@@ -19,8 +19,10 @@ internal abstract class TweakBase : IDisposable
     public abstract string Description { get; }
     public abstract TweakCategory Category { get; }
     public virtual bool DrawConfigWhenDisabled => false;
+    public virtual TweakRequirement? Requirement => null;
     public bool IsEnabled { get; private set; }
     public string? LastError { get; internal set; }
+    public bool IsRequirementMet => this.Requirement?.IsMet(this.Services) != false;
 
     protected DalamudServices Services { get; }
     protected TweakState State { get; }

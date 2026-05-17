@@ -58,6 +58,18 @@ internal sealed class TweakManager : IDisposable
         return changed;
     }
 
+    public bool RefreshRequirementState(TweakBase tweak)
+    {
+        if (!tweak.IsEnabled || tweak.IsRequirementMet)
+        {
+            return false;
+        }
+
+        var changed = this.TrySetEnabled(tweak, false);
+        this.saveConfig();
+        return changed;
+    }
+
     public void Dispose()
     {
         foreach (var tweak in this.tweaks)
@@ -115,6 +127,25 @@ internal sealed class TweakManager : IDisposable
     {
         var previous = tweak.IsEnabled;
         var state = this.config.GetOrCreateTweakState(tweak.Id);
+
+        if (enabled && !tweak.IsRequirementMet)
+        {
+            tweak.LastError = null;
+            if (previous)
+            {
+                try
+                {
+                    tweak.SetEnabled(false);
+                }
+                catch (Exception ex)
+                {
+                    this.services.Log.Error(ex, "Failed to disable tweak {Id} after its requirement became unavailable", tweak.Id);
+                }
+            }
+
+            state.Enabled = false;
+            return previous != tweak.IsEnabled;
+        }
 
         try
         {
