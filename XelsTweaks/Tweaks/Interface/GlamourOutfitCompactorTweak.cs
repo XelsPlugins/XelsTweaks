@@ -2952,7 +2952,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
 
     private bool HasEnoughInventorySpaceForOutfit(QueuedOutfit outfit, out int neededSlots, out int availableSlots)
     {
-        neededSlots = outfit.RestoreItems.Count;
+        neededSlots = outfit.RestoreItems.Count(item => !this.TryFindInventoryBagItem(item, out _));
         availableSlots = this.CountAvailableInventorySlots();
 
         return availableSlots >= neededSlots;
