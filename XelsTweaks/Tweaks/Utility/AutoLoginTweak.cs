@@ -21,6 +21,11 @@ internal sealed unsafe class AutoLoginTweak : TweakBase
     private const string LastErrorKey = "lastError";
     private const string CharaSelectAddonName = "_CharaSelectListMenu";
 
+    private static readonly TweakRequirement LifestreamRequirement = new(
+        "Lifestream",
+        "Lifestream",
+        "https://github.com/NightmareXIV/Lifestream");
+
     private static readonly TimeSpan StartupDelay = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan RetryDelay = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan StartupTimeout = TimeSpan.FromSeconds(45);
@@ -49,6 +54,7 @@ internal sealed unsafe class AutoLoginTweak : TweakBase
     public override string Description => "Uses Lifestream to log in a selected character from startup or character select. Requires Lifestream.";
     public override TweakCategory Category => TweakCategory.Utility;
     public override bool DrawConfigWhenDisabled => true;
+    public override TweakRequirement Requirement => LifestreamRequirement;
 
     public override bool DrawConfig()
     {
