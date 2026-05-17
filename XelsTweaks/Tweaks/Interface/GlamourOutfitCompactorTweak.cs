@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Numerics;
+using System.Runtime.CompilerServices;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Game.Addon.Lifecycle;
 using Dalamud.Game.Addon.Lifecycle.AddonArgTypes;
@@ -27,7 +28,9 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
     private const string SetConvertConfirmAddonName = "MiragePrismPrismSetConvertC";
     private const string ContextIconMenuAddonName = "ContextIconMenu";
     private const string OpenSetConvertSignature = "40 53 41 55 48 81 EC ?? ?? ?? ?? 0F B7 84 24";
+    private const string UpdateSetConvertAddonSignature = "E8 ?? ?? ?? ?? 48 8B 47 ?? 33 DB";
     private const uint GlamourPrismItemId = 21800;
+    private const uint SetConvertRefreshFlags = 4;
     private const uint StoreAsGlamourButtonId = 27;
     private const uint ConfirmStoreAsOutfitCheckBoxId = 4;
     private const uint ConfirmYesButtonId = 6;
@@ -49,6 +52,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
     private readonly List<OutfitCandidate> candidates = [];
     private readonly List<QueuedOutfit> queue = [];
     private delegate* unmanaged<AgentMiragePrismPrismSetConvert*, uint, InventoryType, int, int, bool, void> openSetConvertAddon;
+    private delegate* unmanaged<AgentMiragePrismPrismSetConvert*, uint, void> updateSetConvertAddon;
     private uint[] lastPrismBoxItemIds = [];
     private QueueStep step = QueueStep.Idle;
     private QueuedOutfit? currentOutfit;
@@ -122,6 +126,11 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
         if (this.openSetConvertAddon == null)
         {
             this.openSetConvertAddon = (delegate* unmanaged<AgentMiragePrismPrismSetConvert*, uint, InventoryType, int, int, bool, void>)this.Services.SigScanner.ScanText(OpenSetConvertSignature);
+        }
+
+        if (this.updateSetConvertAddon == null)
+        {
+            this.updateSetConvertAddon = (delegate* unmanaged<AgentMiragePrismPrismSetConvert*, uint, void>)this.Services.SigScanner.ScanText(UpdateSetConvertAddonSignature);
         }
 
         this.Services.Framework.Update += this.OnFrameworkUpdate;
@@ -930,9 +939,15 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
             return false;
         }
 
-        if (dataItems.Any(item => !setItems.Contains(item.ItemId)))
+        var dataItemIds = dataItems.Select(item => item.ItemId).ToHashSet();
+        if (!dataItemIds.SetEquals(setItems))
         {
-            error = "Outfit Glamour Creation opened for a different outfit. Stopped before storing.";
+            if (this.TrySwitchSetConvertOutfit(outfit, out error))
+            {
+                return false;
+            }
+
+            error ??= "Outfit Glamour Creation opened for a different outfit and could not switch to the queued outfit.";
             return false;
         }
 
@@ -948,11 +963,6 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
                 pendingSlot);
             this.pendingSetConvertSlot = null;
             this.pendingSetConvertItemId = null;
-            return false;
-        }
-
-        if (expectedItems.Any(itemId => dataItems.All(item => item.ItemId != itemId)))
-        {
             return false;
         }
 
@@ -993,6 +1003,73 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
             expectedItems.Count,
             outfit.Name);
         return true;
+    }
+
+    private bool TrySwitchSetConvertOutfit(QueuedOutfit outfit, out string? error)
+    {
+        error = null;
+
+        if (outfit.SetConvertOutfitSwitchAttempted)
+        {
+            error = "Outfit Glamour Creation opened for a different outfit after switching once. Stopped before storing.";
+            return false;
+        }
+
+        var agent = AgentMiragePrismPrismSetConvert.Instance();
+        if (agent == null || agent->Data == null)
+        {
+            error = "Outfit Glamour Creation data is not loaded.";
+            return false;
+        }
+
+        if (!agent->Data->ItemSets.ToArray().Any(itemSet => itemSet.ItemId == outfit.SetItemId))
+        {
+            error = "Outfit Glamour Creation opened for a different outfit and the queued outfit was not available for this item.";
+            return false;
+        }
+
+        var agentItems = agent->Data->Items;
+        if (outfit.SetItemIds.Length > agentItems.Length || outfit.SetItemIds.Length != outfit.SetSlotIndexes.Length)
+        {
+            error = "Queued outfit data did not fit the native Outfit Glamour Creation item list.";
+            return false;
+        }
+
+        var itemSheet = this.Services.DataManager.GetExcelSheet<Item>();
+        for (var i = 0; i < agentItems.Length; i++)
+        {
+            agentItems[i] = default;
+        }
+
+        for (var i = 0; i < outfit.SetItemIds.Length; i++)
+        {
+            var itemId = outfit.SetItemIds[i];
+            ref var item = ref agentItems[i];
+            item.ItemId = itemId;
+            item.IconId = itemSheet.TryGetRow(itemId, out var itemRow) ? (uint)itemRow.Icon : 0;
+            SetSetConvertItemSlotIndex(ref item, (uint)outfit.SetSlotIndexes[i]);
+            item.InventoryType = InventoryType.Invalid;
+            item.Slot = 0;
+        }
+
+        agent->Data->NumItemsInSet = (uint)outfit.SetItemIds.Length;
+        outfit.SetConvertOutfitSwitchAttempted = true;
+        this.pendingSetConvertSlot = null;
+        this.pendingSetConvertItemId = null;
+        this.updateSetConvertAddon(agent, SetConvertRefreshFlags);
+        this.status = $"Switching Outfit Glamour Creation to {outfit.Name}.";
+        this.nextActionAt = DateTimeOffset.UtcNow + CandidateRefreshDelay;
+        this.Services.Log.Debug(
+            "Glamour Outfit Compactor switched Outfit Glamour Creation to {OutfitName} ({SetItemId})",
+            outfit.Name,
+            outfit.SetItemId);
+        return true;
+    }
+
+    private static void SetSetConvertItemSlotIndex(ref AgentMiragePrismPrismSetConvert.AgentData.ItemSetItem item, uint slotIndex)
+    {
+        var itemPtr = (byte*)Unsafe.AsPointer(ref item);
+        *(uint*)(itemPtr + 8) = slotIndex;
     }
 
     private string GetSetConvertFillDiagnostic(QueuedOutfit outfit)
@@ -1055,9 +1132,15 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
             return false;
         }
 
-        if (dataItems.Any(item => !setItems.Contains(item.ItemId)))
+        var dataItemIds = dataItems.Select(item => item.ItemId).ToHashSet();
+        if (!dataItemIds.SetEquals(setItems))
         {
-            error = "Outfit Glamour Creation opened for a different outfit. Stopped before storing.";
+            if (!outfit.SetConvertOutfitSwitchAttempted && this.TrySwitchSetConvertOutfit(outfit, out error))
+            {
+                return false;
+            }
+
+            error ??= "Outfit Glamour Creation opened for a different outfit and could not switch to the queued outfit.";
             return false;
         }
 
@@ -1492,6 +1575,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
                     setItemId,
                     name,
                     setItemIds,
+                    setSlots.Select(slot => slot.SlotIndex).ToArray(),
                     selectionItems,
                     restoreItems,
                     inventoryItemIds.ToArray(),
@@ -2023,6 +2107,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
             uint setItemId,
             string name,
             uint[] setItemIds,
+            int[] setSlotIndexes,
             List<CandidateItem> selectionItems,
             List<CandidateItem> restoreItems,
             uint[] inventoryItemIds,
@@ -2033,6 +2118,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
             this.SetItemId = setItemId;
             this.Name = name;
             this.SetItemIds = setItemIds;
+            this.SetSlotIndexes = setSlotIndexes;
             this.SelectionItems = selectionItems;
             this.RestoreItems = restoreItems;
             this.InventoryItemIds = inventoryItemIds;
@@ -2044,6 +2130,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
         public uint SetItemId { get; }
         public string Name { get; }
         public uint[] SetItemIds { get; }
+        public int[] SetSlotIndexes { get; }
         public List<CandidateItem> SelectionItems { get; }
         public List<CandidateItem> RestoreItems { get; }
         public uint[] InventoryItemIds { get; }
@@ -2061,6 +2148,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
             this.SetItemId = candidate.SetItemId;
             this.Name = candidate.Name;
             this.SetItemIds = candidate.SetItemIds;
+            this.SetSlotIndexes = candidate.SetSlotIndexes;
             this.SelectionItems = candidate.SelectionItems;
             this.RestoreItems = candidate.RestoreItems;
             this.InventoryItemIds = candidate.InventoryItemIds;
@@ -2073,6 +2161,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
         public uint SetItemId { get; }
         public string Name { get; }
         public uint[] SetItemIds { get; }
+        public int[] SetSlotIndexes { get; }
         public List<CandidateItem> SelectionItems { get; }
         public List<CandidateItem> RestoreItems { get; }
         public uint[] InventoryItemIds { get; }
@@ -2084,6 +2173,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
         public List<InventorySlot> RestoredSlots { get; } = [];
         public int NextRestoreIndex { get; set; }
         public bool StoredSetRestored { get; set; }
+        public bool SetConvertOutfitSwitchAttempted { get; set; }
     }
 
     private sealed class CandidateItem
