@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Numerics;
+using System.Reflection;
 using System.Runtime.CompilerServices;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Game.Addon.Lifecycle;
@@ -31,6 +32,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
     private const string SelectYesNoAddonName = "SelectYesno";
     private const string SelectYesNoAlternateAddonName = "SelectYesNo";
     private const string ContextIconMenuAddonName = "ContextIconMenu";
+    private const string OpenSetConvertSignature = "40 53 41 55 48 81 EC ?? ?? ?? ?? 0F B7 84 24";
     private const string AddendumPromptFirstLine = "An outfit glamour matching this gear is available.";
     private const string AddendumPromptSecondLine = "Add to pre-existing outfit glamour?";
     private const uint SelectYesNoYesButtonId = 8;
@@ -74,6 +76,8 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
     private bool candidatesDirty = true;
     private bool queuePaused;
     private int confirmCheckBoxAttempts;
+    private nint openSetConvertAddress;
+    private bool useCurrentSetConvertOpenSignature;
 
     public GlamourOutfitCompactorTweak(DalamudServices services, TweakState state, System.Action saveConfig)
         : base(services, state, saveConfig)
@@ -125,6 +129,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
 
     protected override void OnEnable()
     {
+        this.InitializeSetConvertOpenInterop();
         this.Services.Framework.Update += this.OnFrameworkUpdate;
         this.Services.PluginInterface.UiBuilder.Draw += this.DrawOverlay;
         this.Services.GameInventory.InventoryChangedRaw += this.OnInventoryChanged;
@@ -149,6 +154,8 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
         this.ResetQueue("Disabled.");
         this.candidates.Clear();
         this.lastPrismBoxItemIds = [];
+        this.openSetConvertAddress = nint.Zero;
+        this.useCurrentSetConvertOpenSignature = false;
     }
 
     private void OnDresserAddonChanged(AddonEvent eventType, AddonArgs args)
@@ -629,6 +636,41 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
         return true;
     }
 
+    private void InitializeSetConvertOpenInterop()
+    {
+        var address = this.Services.SigScanner.ScanText(OpenSetConvertSignature);
+        if (address == nint.Zero)
+        {
+            throw new InvalidOperationException("Could not find Outfit Glamour Creation open function.");
+        }
+
+        this.openSetConvertAddress = address;
+        this.useCurrentSetConvertOpenSignature = typeof(AgentMiragePrismPrismSetConvert).GetMethod(
+            nameof(AgentMiragePrismPrismSetConvert.Open),
+            BindingFlags.Instance | BindingFlags.Public,
+            null,
+            [typeof(uint), typeof(InventoryType), typeof(int), typeof(ushort), typeof(ushort), typeof(bool)],
+            null) != null;
+    }
+
+    private void OpenSetConvertAgent(AgentMiragePrismPrismSetConvert* agent, InventorySlot sourceSlot, ushort dresserAddonId)
+    {
+        if (this.openSetConvertAddress == nint.Zero)
+        {
+            throw new InvalidOperationException("Outfit Glamour Creation open function is not initialized.");
+        }
+
+        if (this.useCurrentSetConvertOpenSignature)
+        {
+            var open = (delegate* unmanaged<AgentMiragePrismPrismSetConvert*, uint, InventoryType, int, ushort, ushort, bool, bool>)(void*)this.openSetConvertAddress;
+            _ = open(agent, sourceSlot.ItemId, sourceSlot.InventoryType, (int)sourceSlot.Slot, dresserAddonId, 0, true);
+            return;
+        }
+
+        var legacyOpen = (delegate* unmanaged<AgentMiragePrismPrismSetConvert*, uint, InventoryType, int, int, bool, void>)(void*)this.openSetConvertAddress;
+        legacyOpen(agent, sourceSlot.ItemId, sourceSlot.InventoryType, (int)sourceSlot.Slot, dresserAddonId, true);
+    }
+
     private void OpenSetConvert(QueuedOutfit outfit)
     {
         var sourceItem = outfit.SelectionItems.FirstOrDefault(item => this.TryFindInventoryItem(item.ItemId, out _));
@@ -660,7 +702,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
                 sourceSlot.ItemId,
                 sourceSlot.InventoryType,
                 sourceSlot.Slot);
-            agent->Open(sourceSlot.ItemId, sourceSlot.InventoryType, (int)sourceSlot.Slot, dresserAddon.Id, 0, true);
+            this.OpenSetConvertAgent(agent, sourceSlot, dresserAddon.Id);
         }
         catch (Exception ex)
         {
