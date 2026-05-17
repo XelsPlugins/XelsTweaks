@@ -247,7 +247,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
             return;
         }
 
-        if (now - this.stepStartedAt > StepTimeout)
+        if (this.IsTimedQueueStep() && now - this.stepStartedAt > StepTimeout)
         {
             var detail = string.Empty;
             if (this.step == QueueStep.FillingSetConvert && this.currentOutfit != null)
@@ -540,6 +540,11 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
                 this.WaitForStoredOutfit(this.currentOutfit);
                 break;
         }
+    }
+
+    private bool IsTimedQueueStep()
+    {
+        return this.step != QueueStep.WaitingForDyedConfirmation;
     }
 
     private void RestoreNextItem(QueuedOutfit outfit)
