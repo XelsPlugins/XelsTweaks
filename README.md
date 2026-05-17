@@ -1,6 +1,6 @@
 # XelsTweaks
 
-XelsTweaks is a modular Dalamud tweak hub for small opt-in quality-of-life features.
+XelsTweaks is a modular Dalamud tweak hub for opt-in interface and utility fixes.
 
 The first version contains the plugin shell, config window, tweak manager, and Auto Login tweak.
 
