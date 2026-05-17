@@ -22,8 +22,8 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
     public const string TweakId = "interface.glamourOutfitCompactor";
 
     private const string ConfirmDyedOutfitsKey = "confirmDyedOutfits";
-    private const string AttemptNativeStoreClickKey = "attemptNativeStoreClick";
     private const string ShowOverlayOnlyWhenEligibleKey = "showOverlayOnlyWhenEligible";
+    private const string NewInventoryOutfitPolicyKey = "newInventoryOutfitMode";
     private const string DresserAddonName = "MiragePrismPrismBox";
     private const string PlateAddonName = "MiragePrismMiragePlate";
     private const string SetConvertAddonName = "MiragePrismPrismSetConvert";
@@ -71,7 +71,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
     private DateTimeOffset nextActionAt = DateTimeOffset.MinValue;
     private DateTimeOffset stepStartedAt = DateTimeOffset.MinValue;
     private DateTimeOffset nextCandidateRefreshAt = DateTimeOffset.MinValue;
-    private string status = "Open the Glamour Dresser to scan for eligible outfits.";
+    private string status = "Open the Glamour Dresser to find outfits that can be updated.";
     private string? lastError;
     private bool candidatesDirty = true;
     private bool queuePaused;
@@ -85,14 +85,17 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
     }
 
     public override string Id => TweakId;
-    public override string Name => "Glamour Outfit Compactor";
-    public override string Description => "Adds a Glamour Dresser button that stores loose eligible pieces as outfit glamours.";
+    public override string Name => "Glamour Outfit Cleanup";
+    public override string Description => "Adds a Glamour Dresser button that moves loose matching pieces into outfit glamours.";
     public override TweakCategory Category => TweakCategory.Interface;
     public override bool DrawConfigWhenDisabled => true;
 
     private bool ConfirmDyedOutfits => this.GetBool(ConfirmDyedOutfitsKey, true);
-    private bool AttemptNativeStoreClick => this.GetBool(AttemptNativeStoreClickKey, true);
     private bool ShowOverlayOnlyWhenEligible => this.GetBool(ShowOverlayOnlyWhenEligibleKey, true);
+    private NewInventoryOutfitPolicy CurrentNewInventoryOutfitPolicy => (NewInventoryOutfitPolicy)Math.Clamp(
+        this.GetInt(NewInventoryOutfitPolicyKey, (int)NewInventoryOutfitPolicy.Off),
+        (int)NewInventoryOutfitPolicy.Off,
+        (int)NewInventoryOutfitPolicy.PartialAndFullSets);
     private bool IsQueueActive => this.step is not QueueStep.Idle and not QueueStep.Complete and not QueueStep.Error;
 
     public override bool DrawConfig()
@@ -100,29 +103,44 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
         var changed = false;
 
         var confirmDyedOutfits = this.ConfirmDyedOutfits;
-        if (ImGui.Checkbox("Confirm outfits with dyed pieces", ref confirmDyedOutfits))
+        if (ImGui.Checkbox("Ask before adding dyed pieces", ref confirmDyedOutfits))
         {
             this.SetBool(ConfirmDyedOutfitsKey, confirmDyedOutfits);
             changed = true;
         }
 
-        var attemptNativeStoreClick = this.AttemptNativeStoreClick;
-        if (ImGui.Checkbox("Attempt the native Store click automatically", ref attemptNativeStoreClick))
+        var newInventoryOutfitMode = this.CurrentNewInventoryOutfitPolicy;
+        ImGui.SetNextItemWidth(220f);
+        if (ImGui.BeginCombo("New outfits from inventory", FormatNewInventoryOutfitPolicy(newInventoryOutfitMode)))
         {
-            this.SetBool(AttemptNativeStoreClickKey, attemptNativeStoreClick);
-            changed = true;
+            foreach (var mode in Enum.GetValues<NewInventoryOutfitPolicy>())
+            {
+                var isSelected = mode == newInventoryOutfitMode;
+                if (ImGui.Selectable(FormatNewInventoryOutfitPolicy(mode), isSelected))
+                {
+                    this.SetInt(NewInventoryOutfitPolicyKey, (int)mode);
+                    changed = true;
+                }
+
+                if (isSelected)
+                {
+                    ImGui.SetItemDefaultFocus();
+                }
+            }
+
+            ImGui.EndCombo();
         }
 
         var showOverlayOnlyWhenEligible = this.ShowOverlayOnlyWhenEligible;
-        if (ImGui.Checkbox("Hide overlay when no eligible outfits are found", ref showOverlayOnlyWhenEligible))
+        if (ImGui.Checkbox("Hide the dresser overlay when there are no outfits to update", ref showOverlayOnlyWhenEligible))
         {
             this.SetBool(ShowOverlayOnlyWhenEligibleKey, showOverlayOnlyWhenEligible);
             changed = true;
         }
 
-        ImGui.TextColored(WarningColor, "Risk note:");
+        ImGui.TextColored(WarningColor, "Important:");
         ImGui.SameLine();
-        ImGui.TextWrapped("This is user-triggered Glamour Dresser inventory automation. Confirmed dyed pieces may lose dye state when stored into an outfit. Existing outfit pieces stay in the dresser; loose dresser pieces and matching inventory pieces may be added to new or existing outfits.");
+        ImGui.TextWrapped("Updates only run after you press the overlay button. Loose matching pieces may be moved into new or existing outfit glamours. Creating new outfits from inventory can use more Glamour Dresser slots. Dyed pieces can lose dye when stored, so leave Ask before adding dyed pieces on if you want to review those first.");
 
         return changed;
     }
@@ -164,7 +182,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
 
         if (eventType == AddonEvent.PostClose && this.IsQueueActive)
         {
-            this.FailQueue("Glamour Dresser closed; stopped the outfit conversion queue.");
+            this.FailQueue("Glamour Dresser closed; stopped updating outfits.");
         }
     }
 
@@ -177,7 +195,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
 
         if (this.IsQueueActive && !this.IsSetConvertOpen())
         {
-            this.FailQueue("Outfit Glamour Creation closed before the queued outfit was stored.");
+            this.FailQueue("Outfit creation closed before the current outfit was stored.");
         }
     }
 
@@ -208,7 +226,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
         {
             if (!this.IsQueueActive)
             {
-                this.status = "Open the Glamour Dresser to scan for eligible outfits.";
+                this.status = "Open the Glamour Dresser to find outfits that can be updated.";
                 this.candidates.Clear();
                 this.lastPrismBoxItemIds = [];
             }
@@ -231,9 +249,14 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
 
         if (now - this.stepStartedAt > StepTimeout)
         {
-            var detail = this.step == QueueStep.FillingSetConvert && this.currentOutfit != null
-                ? $" {this.GetSetConvertFillDiagnostic(this.currentOutfit)}"
-                : string.Empty;
+            var detail = string.Empty;
+            if (this.step == QueueStep.FillingSetConvert && this.currentOutfit != null)
+            {
+                var diagnostic = this.GetSetConvertFillDiagnostic(this.currentOutfit);
+                this.Services.Log.Warning("Glamour Outfit Compactor timed out while selecting pieces: {Diagnostic}", diagnostic);
+                detail = " The outfit creation window did not finish selecting all pieces.";
+            }
+
             this.FailQueue($"Timed out while {this.GetStepDescription(this.step)}.{detail}");
             return;
         }
@@ -268,7 +291,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
             ImGuiCond.Always);
         ImGui.SetNextWindowSize(new Vector2(350f, 0f), ImGuiCond.Always);
 
-        if (!ImGui.Begin("Glamour Outfit Compactor###XelsTweaksGlamourOutfitCompactor", ImGuiWindowFlags.NoSavedSettings | ImGuiWindowFlags.NoMove | ImGuiWindowFlags.AlwaysAutoResize))
+        if (!ImGui.Begin("Glamour Outfit Cleanup###XelsTweaksGlamourOutfitCompactor", ImGuiWindowFlags.NoSavedSettings | ImGuiWindowFlags.NoMove | ImGuiWindowFlags.AlwaysAutoResize))
         {
             ImGui.End();
             return;
@@ -280,21 +303,18 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
 
     private void DrawOverlayContents()
     {
-        ImGui.TextUnformatted("Glamour Outfit Compactor");
-        ImGui.Separator();
-
-        ImGui.TextUnformatted($"Eligible outfits: {this.candidates.Count}");
         if (this.step == QueueStep.Idle && this.candidates.Count > 0)
         {
             var glamourPrismCost = this.candidates.Sum(candidate => candidate.GlamourPrismCost);
             var glamourPrismsAvailable = this.CountInventoryItem(GlamourPrismItemId);
+            var glamourPrismText = $"Glamour Prisms: {glamourPrismCost} / {glamourPrismsAvailable}";
             if (glamourPrismsAvailable < glamourPrismCost)
             {
-                ImGui.TextColored(WarningColor, $"Glamour Prisms: {glamourPrismsAvailable} / {glamourPrismCost}");
+                ImGui.TextColored(WarningColor, glamourPrismText);
             }
             else
             {
-                ImGui.TextUnformatted($"Glamour Prisms: {glamourPrismsAvailable} / {glamourPrismCost}");
+                ImGui.TextUnformatted(glamourPrismText);
             }
         }
 
@@ -330,7 +350,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
                     ImGui.BeginDisabled();
                 }
 
-                if (ImGui.Button("Update eligible outfits"))
+                if (ImGui.Button("Update outfits"))
                 {
                     this.StartQueue();
                 }
@@ -340,26 +360,19 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
                     ImGui.EndDisabled();
                 }
 
-                ImGui.SameLine();
-                if (ImGui.Button("Rescan"))
-                {
-                    this.MarkCandidatesDirty();
-                    this.RefreshCandidatesIfNeeded(true);
-                }
-
                 break;
 
             case QueueStep.WaitingForDyedConfirmation:
-                ImGui.TextColored(WarningColor, "This update may add dyed pieces.");
+                ImGui.TextColored(WarningColor, "This outfit includes dyed pieces.");
                 if (ImGui.Button("Continue"))
                 {
-                    this.EnterStep(QueueStep.RestoringItems, $"Restoring loose pieces for {this.currentOutfit?.Name ?? "outfit"}.");
+                    this.EnterStep(QueueStep.RestoringItems, $"Restoring pieces for {this.currentOutfit?.Name ?? "outfit"}.");
                 }
 
                 ImGui.SameLine();
                 if (ImGui.Button("Skip outfit"))
                 {
-                    this.SkipCurrentOutfit("Skipped dyed outfit.");
+                    this.SkipCurrentOutfit("Skipped outfit with dyed pieces.");
                 }
 
                 ImGui.SameLine();
@@ -373,7 +386,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
             case QueueStep.Error:
                 if (ImGui.Button("Reset"))
                 {
-                    this.ResetQueue("Idle.");
+                    this.ResetQueue("Ready.");
                     this.MarkCandidatesDirty();
                 }
 
@@ -382,7 +395,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
             case QueueStep.Complete:
                 if (ImGui.Button("Reset"))
                 {
-                    this.ResetQueue("Idle.");
+                    this.ResetQueue("Ready.");
                     this.MarkCandidatesDirty();
                 }
 
@@ -392,7 +405,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
                 if (ImGui.Button(this.queuePaused ? "Resume" : "Pause"))
                 {
                     this.queuePaused = !this.queuePaused;
-                    this.status = this.queuePaused ? "Paused." : $"Resuming {this.currentOutfit?.Name ?? "queue"}.";
+                    this.status = this.queuePaused ? "Paused." : $"Resuming {this.currentOutfit?.Name ?? "outfit updates"}.";
                     this.nextActionAt = DateTimeOffset.UtcNow + ActionDelay;
                     this.stepStartedAt = DateTimeOffset.UtcNow;
                 }
@@ -409,8 +422,8 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
         if (this.currentOutfit != null)
         {
             ImGui.Spacing();
-            ImGui.TextDisabled($"Current: {this.currentOutfit.Name}");
-            ImGui.TextDisabled($"{this.currentOutfit.SelectionItems.Count} added piece{(this.currentOutfit.SelectionItems.Count == 1 ? string.Empty : "s")}{(this.currentOutfit.IsMerge ? " (addendum)" : string.Empty)}");
+            ImGui.TextDisabled($"Working on: {this.currentOutfit.Name}");
+            ImGui.TextDisabled($"{this.currentOutfit.SelectionItems.Count} piece{(this.currentOutfit.SelectionItems.Count == 1 ? string.Empty : "s")} to add{(this.currentOutfit.IsMerge ? " to an existing outfit" : string.Empty)}");
         }
 
         if (this.skippedOutfits > 0)
@@ -433,7 +446,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
 
         if (this.queue.Count == 0)
         {
-            this.ResetQueue("No eligible outfits found.");
+            this.ResetQueue("No Glamour Dresser slots to clean up.");
             return;
         }
 
@@ -443,7 +456,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
         }
 
         var glamourPrismCost = this.GetRemainingGlamourPrismCost();
-        this.status = $"Queued {this.queue.Count} outfit update{(this.queue.Count == 1 ? string.Empty : "s")}.";
+        this.status = $"Starting {this.queue.Count} outfit update{(this.queue.Count == 1 ? string.Empty : "s")}.";
         if (glamourPrismCost > 0)
         {
             this.status += $" Requires {glamourPrismCost} Glamour Prism{(glamourPrismCost == 1 ? string.Empty : "s")}.";
@@ -485,11 +498,11 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
 
         if (this.currentOutfit.RequiresConfirmation && this.ConfirmDyedOutfits)
         {
-            this.EnterStep(QueueStep.WaitingForDyedConfirmation, $"{this.currentOutfit.Name} may add dyed pieces. Confirm before continuing.");
+            this.EnterStep(QueueStep.WaitingForDyedConfirmation, $"{this.currentOutfit.Name} includes dyed pieces. Confirm before continuing.");
             return;
         }
 
-        this.EnterStep(QueueStep.RestoringItems, $"Restoring loose pieces for {this.currentOutfit.Name}.");
+        this.EnterStep(QueueStep.RestoringItems, $"Restoring pieces for {this.currentOutfit.Name}.");
     }
 
     private void AdvanceQueue()
@@ -551,7 +564,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
                 return;
             }
 
-            this.EnterStep(QueueStep.OpeningSetConvert, $"Opening Outfit Glamour Creation for {outfit.Name}.");
+            this.EnterStep(QueueStep.OpeningSetConvert, $"Opening outfit creation for {outfit.Name}.");
             return;
         }
 
@@ -559,7 +572,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
         var manager = MirageManager.Instance();
         if (manager == null || !manager->PrismBoxLoaded)
         {
-            this.status = "Waiting for Glamour Dresser data before restoring an outfit piece.";
+            this.status = "Waiting for the Glamour Dresser before restoring a piece.";
             this.nextActionAt = DateTimeOffset.UtcNow + CandidateRefreshDelay;
             return;
         }
@@ -569,8 +582,8 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
         {
             this.ScheduleItemRestoreRetry(
                 item.ItemId,
-                $"Waiting for {item.ItemId} to be available in the Glamour Dresser before restoring {outfit.Name}.",
-                $"Could not find {item.ItemId} in the Glamour Dresser anymore.");
+                $"Waiting for a piece to be available in the Glamour Dresser before restoring {outfit.Name}.",
+                "Could not find one of the pieces in the Glamour Dresser anymore.");
             return;
         }
 
@@ -578,21 +591,21 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
         {
             this.ScheduleItemRestoreRetry(
                 item.ItemId,
-                $"The game refused to restore {item.ItemId}; waiting briefly before retrying.",
-                "The game refused to restore an outfit piece. Inventory may be full or a unique item may already be owned.");
+                "Could not restore a piece yet; waiting briefly before trying again.",
+                "Could not restore an outfit piece. Inventory may be full, or you may already have a unique item.");
             return;
         }
 
         this.ClearRestoreRetryState();
         this.waitingForRestoredItemId = item.ItemId;
-        this.EnterStep(QueueStep.WaitingForRestore, $"Waiting for {item.ItemId} to return to inventory.");
+        this.EnterStep(QueueStep.WaitingForRestore, "Waiting for a restored piece to return to inventory.");
     }
 
     private void WaitForRestoredItem(QueuedOutfit outfit)
     {
         if (this.waitingForRestoredItemId == null)
         {
-            this.EnterStep(QueueStep.RestoringItems, $"Restoring loose pieces for {outfit.Name}.");
+            this.EnterStep(QueueStep.RestoringItems, $"Restoring pieces for {outfit.Name}.");
             return;
         }
 
@@ -606,7 +619,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
         outfit.NextRestoreIndex++;
         this.waitingForRestoredItemId = null;
         this.ClearRestoreRetryState();
-        this.EnterStep(QueueStep.RestoringItems, $"Restoring loose pieces for {outfit.Name}.");
+        this.EnterStep(QueueStep.RestoringItems, $"Restoring pieces for {outfit.Name}.");
     }
 
     private void AddRestoredSlot(QueuedOutfit outfit, InventorySlot slot)
@@ -625,7 +638,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
         {
             if (!this.TryFindInventoryItem(item.ItemId, out var slot))
             {
-                error = $"Missing required item {item.ItemId} from inventory. Stopped before opening Outfit Glamour Creation.";
+                error = "Could not find one of the pieces to add in inventory. Stopped before opening outfit creation.";
                 return false;
             }
 
@@ -641,7 +654,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
         var address = this.Services.SigScanner.ScanText(OpenSetConvertSignature);
         if (address == nint.Zero)
         {
-            throw new InvalidOperationException("Could not find Outfit Glamour Creation open function.");
+            throw new InvalidOperationException("Could not initialize outfit creation support.");
         }
 
         this.openSetConvertAddress = address;
@@ -657,7 +670,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
     {
         if (this.openSetConvertAddress == nint.Zero)
         {
-            throw new InvalidOperationException("Outfit Glamour Creation open function is not initialized.");
+            throw new InvalidOperationException("Outfit creation support is not initialized.");
         }
 
         if (this.useCurrentSetConvertOpenSignature)
@@ -683,14 +696,14 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
         var dresserAddon = this.Services.GameGui.GetAddonByName(DresserAddonName, 1);
         if (dresserAddon.IsNull || dresserAddon.Address == IntPtr.Zero)
         {
-            this.FailQueue("Glamour Dresser addon is not available.");
+            this.FailQueue("Glamour Dresser is not available.");
             return;
         }
 
         var agent = AgentMiragePrismPrismSetConvert.Instance();
         if (agent == null)
         {
-            this.FailQueue("Outfit Glamour Creation agent is not available.");
+            this.FailQueue("Outfit creation is not available.");
             return;
         }
 
@@ -706,12 +719,12 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
         }
         catch (Exception ex)
         {
-            this.FailQueue("Failed to open Outfit Glamour Creation for the outfit piece to add.");
+            this.FailQueue("Could not open outfit creation for the piece to add.");
             this.Services.Log.Warning(ex, "Failed to open Outfit Glamour Creation for {OutfitName} from item {ItemId}", outfit.Name, sourceSlot.ItemId);
             return;
         }
 
-        this.EnterStep(QueueStep.FillingSetConvert, $"Filling Outfit Glamour Creation for {outfit.Name}.");
+        this.EnterStep(QueueStep.FillingSetConvert, $"Selecting pieces for {outfit.Name}.");
     }
 
     private void FillSetConvert(QueuedOutfit outfit)
@@ -744,7 +757,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
             return;
         }
 
-        this.EnterStep(QueueStep.ValidatingSetConvert, $"Validating selected pieces for {outfit.Name}.");
+        this.EnterStep(QueueStep.ValidatingSetConvert, $"Checking selected pieces for {outfit.Name}.");
     }
 
     private void ValidateSetConvert(QueuedOutfit outfit)
@@ -767,7 +780,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
 
         if (this.TryValidateSetConvertItems(outfit, out var error))
         {
-            this.EnterStep(QueueStep.StoringOutfit, $"Storing {outfit.Name} as an outfit.");
+            this.EnterStep(QueueStep.StoringOutfit, $"Storing {outfit.Name}.");
             return;
         }
 
@@ -795,12 +808,6 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
 
     private void StoreOutfit(QueuedOutfit outfit)
     {
-        if (!this.AttemptNativeStoreClick)
-        {
-            this.FailQueue("Automatic native Store click is disabled. The pieces to add are selected in the Outfit Glamour Creation window.");
-            return;
-        }
-
         if (!this.TryValidateSetConvertItems(outfit, out var error))
         {
             if (error != null)
@@ -809,19 +816,19 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
                 return;
             }
 
-            this.EnterStep(QueueStep.ValidatingSetConvert, $"Revalidating selected pieces for {outfit.Name}.");
+            this.EnterStep(QueueStep.ValidatingSetConvert, $"Checking selected pieces for {outfit.Name}.");
             return;
         }
 
         if (!this.TryGetSetConvertAddon(out var addon))
         {
-            this.FailQueue("Outfit Glamour Creation addon is not ready for the native Store button.");
+            this.FailQueue("Outfit creation is not ready for Store.");
             return;
         }
 
         if (!this.TryClickButton(addon, StoreAsGlamourButtonId))
         {
-            this.FailQueue("The native Store as Glamour button was not available.");
+            this.FailQueue("Store as Outfit Glamour was not available.");
             return;
         }
 
@@ -859,26 +866,26 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
         if (this.confirmCheckBoxAttempts < 2 && this.TryClickCheckBox(addon, ConfirmStoreAsOutfitCheckBoxId))
         {
             this.confirmCheckBoxAttempts++;
-            this.status = "Waiting for the native confirmation to enable Yes after selecting Store as Outfit Glamour.";
+            this.status = "Waiting for the confirmation to enable Yes after selecting Store as Outfit Glamour.";
             this.nextActionAt = DateTimeOffset.UtcNow + CandidateRefreshDelay;
             return;
         }
 
         if (this.TryForceEnableConfirmYes(addon, ConfirmStoreAsOutfitCheckBoxId, ConfirmYesButtonId))
         {
-            this.status = "Using guarded fallback to enable the native Outfit Glamour Creation confirmation.";
+            this.status = "Preparing the storage confirmation.";
             this.nextActionAt = DateTimeOffset.UtcNow + CandidateRefreshDelay;
             return;
         }
 
         if (this.TryNotifyCheckedCheckBox(addon, ConfirmStoreAsOutfitCheckBoxId))
         {
-            this.status = "Waiting for the native confirmation to enable Yes after selecting Store as Outfit Glamour.";
+            this.status = "Waiting for the confirmation to enable Yes after selecting Store as Outfit Glamour.";
             this.nextActionAt = DateTimeOffset.UtcNow + CandidateRefreshDelay;
             return;
         }
 
-        this.status = "Waiting for the native Outfit Glamour Creation confirmation controls.";
+        this.status = "Waiting for the storage confirmation controls.";
         this.nextActionAt = DateTimeOffset.UtcNow + CandidateRefreshDelay;
     }
 
@@ -944,7 +951,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
                 return false;
             }
 
-            error ??= "Outfit Glamour Creation opened for a different outfit and could not switch to the queued outfit.";
+            error ??= "Outfit creation opened for a different outfit and could not switch to the current outfit.";
             return false;
         }
 
@@ -972,7 +979,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
 
             if (!this.TryFindInventoryItem(item.ItemId, out var slot))
             {
-                error = $"Missing required item {item.ItemId} from inventory.";
+                error = "Could not find one of the pieces to add in inventory.";
                 return false;
             }
 
@@ -984,7 +991,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
             this.FireSetConvertHandOverCallback(addon, item.Index);
             this.pendingSetConvertSlot = item.Index;
             this.pendingSetConvertItemId = item.ItemId;
-            this.status = $"Selecting item {item.ItemId} for {outfit.Name}.";
+            this.status = $"Selecting a piece for {outfit.Name}.";
             this.Services.Log.Debug(
                 "Glamour Outfit Compactor requested native handover for {OutfitName}: item {ItemId}, UI slot {UiSlot}, inventory {InventoryType}:{InventorySlot}",
                 outfit.Name,
@@ -1008,27 +1015,27 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
 
         if (outfit.SetConvertOutfitSwitchAttempted)
         {
-            error = "Outfit Glamour Creation opened for a different outfit after switching once. Stopped before storing.";
+            error = "Outfit creation opened for a different outfit after switching once. Stopped before storing.";
             return false;
         }
 
         var agent = AgentMiragePrismPrismSetConvert.Instance();
         if (agent == null || agent->Data == null)
         {
-            error = "Outfit Glamour Creation data is not loaded.";
+            error = "Outfit creation data is still loading.";
             return false;
         }
 
         if (!agent->Data->ItemSets.ToArray().Any(itemSet => itemSet.ItemId == outfit.SetItemId))
         {
-            error = "Outfit Glamour Creation opened for a different outfit and the queued outfit was not available for this item.";
+            error = "Outfit creation opened for a different outfit, and the current outfit was not available for this item.";
             return false;
         }
 
         var agentItems = agent->Data->Items;
         if (outfit.SetItemIds.Length > agentItems.Length || outfit.SetItemIds.Length != outfit.SetSlotIndexes.Length)
         {
-            error = "Queued outfit data did not fit the native Outfit Glamour Creation item list.";
+            error = "The outfit data did not match the outfit creation window.";
             return false;
         }
 
@@ -1054,7 +1061,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
         this.pendingSetConvertSlot = null;
         this.pendingSetConvertItemId = null;
         agent->Update(SetConvertRefreshFlags);
-        this.status = $"Switching Outfit Glamour Creation to {outfit.Name}.";
+        this.status = $"Switching outfit creation to {outfit.Name}.";
         this.nextActionAt = DateTimeOffset.UtcNow + CandidateRefreshDelay;
         this.Services.Log.Debug(
             "Glamour Outfit Compactor switched Outfit Glamour Creation to {OutfitName} ({SetItemId})",
@@ -1145,7 +1152,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
                 return false;
             }
 
-            error ??= "Outfit Glamour Creation opened for a different outfit and could not switch to the queued outfit.";
+            error ??= "Outfit creation opened for a different outfit and could not switch to the current outfit.";
             return false;
         }
 
@@ -1172,7 +1179,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
 
             if (!this.TryFindInventoryItem(expectedItemId, out var slot))
             {
-                error = $"Missing required item {expectedItemId} from inventory.";
+                error = "Could not find one of the selected pieces in inventory.";
                 return false;
             }
 
@@ -1210,7 +1217,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
         var method = this.TryConfirmAddendumPrompt(unitBase, outfit.AddendumPromptAttempts);
         if (method == null)
         {
-            this.status = $"Waiting for addendum prompt controls for {outfit.Name}.";
+            this.status = $"Waiting for the existing outfit prompt for {outfit.Name}.";
             this.nextActionAt = DateTimeOffset.UtcNow + CandidateRefreshDelay;
             this.Services.Log.Warning(
                 "Glamour Outfit Compactor could not confirm addendum prompt for {OutfitName}: attempt={Attempt}, {Diagnostic}",
@@ -1220,7 +1227,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
             return true;
         }
 
-        this.status = $"Confirming addendum prompt for {outfit.Name} ({method}).";
+        this.status = $"Confirming the existing outfit prompt for {outfit.Name}.";
         outfit.NativeAddendumAccepted = true;
         this.nextActionAt = DateTimeOffset.UtcNow + CandidateRefreshDelay;
         this.Services.Log.Warning(
@@ -1387,7 +1394,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
         var requiredValueCount = SetConvertUiItemsOffset + (itemCount * SetConvertUiItemStride);
         if (addon->AtkValuesCount < requiredValueCount)
         {
-            error = $"Outfit Glamour Creation UI data had {addon->AtkValuesCount} values; expected at least {requiredValueCount}.";
+            error = "Outfit creation data is still loading.";
             return false;
         }
 
@@ -1409,7 +1416,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
                 || !this.TryReadAtkUInt(addon, offset + 5, out var slot)
                 || !this.TryReadAtkUInt(addon, offset + 6, out var flag))
             {
-                error = $"Outfit Glamour Creation UI row {i} was not readable.";
+                error = "Could not read one of the outfit creation rows.";
                 return false;
             }
 
@@ -1523,11 +1530,11 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
         this.restoreRetryAttempts++;
         if (this.restoreRetryAttempts >= MaxRestoreAttempts)
         {
-            this.FailQueue($"{finalError} Retried {MaxRestoreAttempts} times.");
+            this.FailQueue($"{finalError} Tried {MaxRestoreAttempts} times.");
             return;
         }
 
-        this.status = $"{retryStatus} Retrying attempt {this.restoreRetryAttempts + 1}/{MaxRestoreAttempts}.";
+        this.status = $"{retryStatus} Trying again ({this.restoreRetryAttempts + 1}/{MaxRestoreAttempts}).";
         this.nextActionAt = DateTimeOffset.UtcNow + RestoreRetryDelay;
         this.MarkCandidatesDirty();
         this.Services.Log.Debug(
@@ -1631,7 +1638,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
             this.lastPrismBoxItemIds = [];
             if (this.step == QueueStep.Idle)
             {
-                this.status = "Waiting for Glamour Dresser data.";
+                this.status = "Waiting for the Glamour Dresser.";
             }
 
             return;
@@ -1744,7 +1751,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
                     continue;
                 }
 
-                rawCandidates.Add(new OutfitCandidate(
+                var candidate = new OutfitCandidate(
                     setItemId,
                     name,
                     setItemIds,
@@ -1754,13 +1761,20 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
                     inventoryItemIds.ToArray(),
                     storedSlotIndexes.ToArray(),
                     storedSetItemIds.ToArray(),
-                    selectionItems.Any(item => item.Dyed)));
+                    selectionItems.Any(item => item.Dyed));
+                if (!this.ShouldIncludeCandidate(candidate))
+                {
+                    continue;
+                }
+
+                rawCandidates.Add(candidate);
             }
         }
 
         var reservedItems = new HashSet<uint>();
         foreach (var candidate in rawCandidates
-            .OrderByDescending(candidate => candidate.IsMerge)
+            .OrderByDescending(candidate => candidate.GlamourDresserSlotsSaved)
+            .ThenByDescending(candidate => candidate.IsMerge)
             .ThenByDescending(candidate => candidate.SelectionItems.Count + candidate.StoredSetItemIds.Length)
             .ThenByDescending(candidate => candidate.SelectionItems.Count)
             .ThenBy(candidate => candidate.Name, StringComparer.OrdinalIgnoreCase)
@@ -1787,16 +1801,59 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
 
         if (this.step == QueueStep.Idle)
         {
-            var mergeCount = this.candidates.Count(candidate => candidate.IsMerge);
             if (this.candidates.Count == 0)
             {
-                this.status = "No outfit candidates found.";
+                this.status = "No Glamour Dresser slots to clean up.";
             }
             else
             {
-                this.status = $"{this.candidates.Count} outfit update{(this.candidates.Count == 1 ? string.Empty : "s")} can be compacted{(mergeCount == 0 ? "." : $" ({mergeCount} addendum{(mergeCount == 1 ? string.Empty : "s")}).")}";
+                this.status = this.GetCandidateSummary();
             }
         }
+    }
+
+    private string GetCandidateSummary()
+    {
+        var totalUpdates = this.candidates.Count;
+        var totalSlotSavings = this.candidates.Where(candidate => candidate.GlamourDresserSlotsSaved > 0).Sum(candidate => candidate.GlamourDresserSlotsSaved);
+        var slotUsingInventoryOutfitCount = this.candidates.Count(candidate => candidate.GlamourDresserSlotsSaved < 0 && candidate.IsNewOutfitUsingInventory);
+
+        if (totalSlotSavings > 0 && slotUsingInventoryOutfitCount > 0)
+        {
+            return $"{totalUpdates} outfit update{(totalUpdates == 1 ? string.Empty : "s")} available. {totalSlotSavings} Glamour Dresser slot{(totalSlotSavings == 1 ? string.Empty : "s")} can be freed; {slotUsingInventoryOutfitCount} new inventory outfit{(slotUsingInventoryOutfitCount == 1 ? string.Empty : "s")} will use a slot.";
+        }
+
+        if (totalSlotSavings > 0)
+        {
+            return $"{totalUpdates} outfit update{(totalUpdates == 1 ? string.Empty : "s")} can free {totalSlotSavings} Glamour Dresser slot{(totalSlotSavings == 1 ? string.Empty : "s")}.";
+        }
+
+        if (slotUsingInventoryOutfitCount > 0)
+        {
+            return $"{slotUsingInventoryOutfitCount} inventory outfit{(slotUsingInventoryOutfitCount == 1 ? string.Empty : "s")} can be created.";
+        }
+
+        return $"{totalUpdates} outfit update{(totalUpdates == 1 ? string.Empty : "s")} available without using more Glamour Dresser slots.";
+    }
+
+    private bool ShouldIncludeCandidate(OutfitCandidate candidate)
+    {
+        if (candidate.GlamourDresserSlotsSaved >= 0)
+        {
+            return true;
+        }
+
+        if (!candidate.IsNewOutfitUsingInventory)
+        {
+            return false;
+        }
+
+        return this.CurrentNewInventoryOutfitPolicy switch
+        {
+            NewInventoryOutfitPolicy.FullSetsOnly => candidate.IsCompleteOutfit,
+            NewInventoryOutfitPolicy.PartialAndFullSets => true,
+            _ => false
+        };
     }
 
     private bool TryCreateCandidateItem(uint itemId, Dictionary<uint, int> itemIndexes, MirageManager* manager, out CandidateItem? item)
@@ -1917,7 +1974,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
         }
 
         var remainingOutfits = (this.currentOutfit == null ? 0 : 1) + this.queue.Count;
-        this.FailQueue($"Need {neededPrisms} Glamour Prism{(neededPrisms == 1 ? string.Empty : "s")} to finish {remainingOutfits} queued outfit{(remainingOutfits == 1 ? string.Empty : "s")}, but only {availablePrisms} available.");
+        this.FailQueue($"Need {neededPrisms} Glamour Prism{(neededPrisms == 1 ? string.Empty : "s")} to finish {remainingOutfits} outfit update{(remainingOutfits == 1 ? string.Empty : "s")}, but only {availablePrisms} available.");
         return true;
     }
 
@@ -2279,16 +2336,33 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
         return queueStep switch
         {
             QueueStep.WaitingForDyedConfirmation => "waiting for dyed outfit confirmation",
-            QueueStep.RestoringItems => "restoring loose outfit pieces",
+            QueueStep.RestoringItems => "restoring outfit pieces",
             QueueStep.WaitingForRestore => "waiting for inventory updates",
-            QueueStep.OpeningSetConvert => "opening Outfit Glamour Creation",
-            QueueStep.FillingSetConvert => "filling Outfit Glamour Creation",
-            QueueStep.ValidatingSetConvert => "validating selected outfit pieces",
-            QueueStep.StoringOutfit => "pressing the native Store action",
-            QueueStep.ConfirmingStore => "confirming the native Store action",
+            QueueStep.OpeningSetConvert => "opening outfit creation",
+            QueueStep.FillingSetConvert => "selecting outfit pieces",
+            QueueStep.ValidatingSetConvert => "checking selected outfit pieces",
+            QueueStep.StoringOutfit => "storing the outfit",
+            QueueStep.ConfirmingStore => "confirming storage",
             QueueStep.WaitingForStore => "waiting for the outfit to be stored",
-            _ => "processing the queue"
+            _ => "updating outfits"
         };
+    }
+
+    private static string FormatNewInventoryOutfitPolicy(NewInventoryOutfitPolicy mode)
+    {
+        return mode switch
+        {
+            NewInventoryOutfitPolicy.FullSetsOnly => "Full sets only",
+            NewInventoryOutfitPolicy.PartialAndFullSets => "Partial and full sets",
+            _ => "Off"
+        };
+    }
+
+    private enum NewInventoryOutfitPolicy
+    {
+        Off,
+        FullSetsOnly,
+        PartialAndFullSets
     }
 
     private enum QueueStep
@@ -2344,7 +2418,10 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
         public uint[] StoredSetItemIds { get; }
         public bool RequiresConfirmation { get; }
         public int GlamourPrismCost => this.SelectionItems.Count;
+        public int GlamourDresserSlotsSaved => this.RestoreItems.Count - (this.IsMerge ? 0 : 1);
         public bool IsMerge => this.StoredSlotIndexes.Length > 0;
+        public bool IsNewOutfitUsingInventory => !this.IsMerge && this.InventoryItemIds.Length > 0;
+        public bool IsCompleteOutfit => this.SelectionItems.Count == this.SetItemIds.Length;
     }
 
     private sealed class QueuedOutfit

@@ -36,8 +36,8 @@ internal sealed unsafe class TryOnCopyItemNameTweak : TweakBase
     }
 
     public override string Id => TweakId;
-    public override string Name => "Copy Item Name Context Menu";
-    public override string Description => "Adds Copy Item Name to selected item context menus.";
+    public override string Name => "Copy Item Names";
+    public override string Description => "Adds Copy Item Name to supported item right-click menus.";
     public override TweakCategory Category => TweakCategory.Interface;
     public override bool DrawConfigWhenDisabled => true;
 
@@ -53,14 +53,15 @@ internal sealed unsafe class TryOnCopyItemNameTweak : TweakBase
     public override bool DrawConfig()
     {
         var changed = false;
+        ImGui.TextWrapped("Show the menu option in:");
         changed |= this.DrawBool("Inventory", InventoryKey, true);
         changed |= this.DrawBool("Armoury Chest", ArmouryChestKey, true);
         changed |= this.DrawBool("Chocobo Saddlebag", ChocoboSaddlebagKey, true);
         changed |= this.DrawBool("Fitting Room", FittingRoomKey, true);
-        changed |= this.DrawBool("Retainer inventories", RetainerInventoryKey, false);
+        changed |= this.DrawBool("Retainer Inventory", RetainerInventoryKey, false);
         changed |= this.DrawBool("Free Company Chest", FreeCompanyChestKey, false);
-        changed |= this.DrawBool("Housing storage", HousingStorageKey, false);
-        changed |= this.DrawBool("Other inventory-style windows", OtherInventoryKey, false);
+        changed |= this.DrawBool("Housing Storage", HousingStorageKey, false);
+        changed |= this.DrawBool("Other item windows", OtherInventoryKey, false);
         return changed;
     }
 

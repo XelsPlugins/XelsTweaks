@@ -23,19 +23,19 @@ internal sealed class LifestreamIpc
 
     public bool TryCanAutoLogin(out bool result, out string? error)
     {
-        return TryInvoke(this.canAutoLogin, "Lifestream.CanAutoLogin", out result, out error);
+        return TryInvoke(this.canAutoLogin, "Lifestream auto-login", out result, out error);
     }
 
     public bool TryIsBusy(out bool result, out string? error)
     {
-        return TryInvoke(this.isBusy, "Lifestream.IsBusy", out result, out error);
+        return TryInvoke(this.isBusy, "Lifestream status", out result, out error);
     }
 
     public bool TryCanInitiateTravelFromCharaSelectList(out bool result, out string? error)
     {
         return TryInvoke(
             this.canInitiateTravelFromCharaSelectList,
-            "Lifestream.CanInitiateTravelFromCharaSelectList",
+            "Lifestream character select login",
             out result,
             out error);
     }
@@ -44,7 +44,7 @@ internal sealed class LifestreamIpc
     {
         return TryInvoke(
             this.connectAndLogin,
-            "Lifestream.ConnectAndLogin",
+            "Lifestream login",
             characterName,
             homeWorld,
             out result,
@@ -55,7 +55,7 @@ internal sealed class LifestreamIpc
     {
         return TryInvoke(
             this.initiateLoginFromCharaSelectScreen,
-            "Lifestream.InitiateLoginFromCharaSelectScreen",
+            "Lifestream character select login",
             characterName,
             homeWorld,
             out result,
