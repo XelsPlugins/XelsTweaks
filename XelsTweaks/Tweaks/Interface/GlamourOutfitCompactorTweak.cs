@@ -9,6 +9,7 @@ using Dalamud.Game.Addon.Lifecycle.AddonArgTypes;
 using Dalamud.Game.Inventory.InventoryEventArgTypes;
 using Dalamud.Plugin.Services;
 using FFXIVClientStructs.FFXIV.Client.Game;
+using FFXIVClientStructs.FFXIV.Client.UI;
 using FFXIVClientStructs.FFXIV.Client.UI.Agent;
 using FFXIVClientStructs.FFXIV.Component.GUI;
 using Lumina.Excel.Sheets;
@@ -25,10 +26,14 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
     private const string DresserAddonName = "MiragePrismPrismBox";
     private const string PlateAddonName = "MiragePrismMiragePlate";
     private const string SetConvertAddonName = "MiragePrismPrismSetConvert";
+    private const string SetConvertAlternateAddonName = "MiragePrismPrismBoxCrystallize";
     private const string SetConvertConfirmAddonName = "MiragePrismPrismSetConvertC";
+    private const string SelectYesNoAddonName = "SelectYesno";
+    private const string SelectYesNoAlternateAddonName = "SelectYesNo";
     private const string ContextIconMenuAddonName = "ContextIconMenu";
-    private const string OpenSetConvertSignature = "40 53 41 55 48 81 EC ?? ?? ?? ?? 0F B7 84 24";
-    private const string UpdateSetConvertAddonSignature = "E8 ?? ?? ?? ?? 48 8B 47 ?? 33 DB";
+    private const string AddendumPromptFirstLine = "An outfit glamour matching this gear is available.";
+    private const string AddendumPromptSecondLine = "Add to pre-existing outfit glamour?";
+    private const uint SelectYesNoYesButtonId = 8;
     private const uint GlamourPrismItemId = 21800;
     private const uint SetConvertRefreshFlags = 4;
     private const uint StoreAsGlamourButtonId = 27;
@@ -51,8 +56,6 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
 
     private readonly List<OutfitCandidate> candidates = [];
     private readonly List<QueuedOutfit> queue = [];
-    private delegate* unmanaged<AgentMiragePrismPrismSetConvert*, uint, InventoryType, int, int, bool, void> openSetConvertAddon;
-    private delegate* unmanaged<AgentMiragePrismPrismSetConvert*, uint, void> updateSetConvertAddon;
     private uint[] lastPrismBoxItemIds = [];
     private QueueStep step = QueueStep.Idle;
     private QueuedOutfit? currentOutfit;
@@ -61,7 +64,6 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
     private uint? waitingForRestoredItemId;
     private uint? restoreRetryItemId;
     private int restoreRetryAttempts;
-    private int storedSetRestoreRetryAttempts;
     private int? pendingSetConvertSlot;
     private uint? pendingSetConvertItemId;
     private DateTimeOffset nextActionAt = DateTimeOffset.MinValue;
@@ -80,7 +82,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
 
     public override string Id => TweakId;
     public override string Name => "Glamour Outfit Compactor";
-    public override string Description => "Adds a Glamour Dresser button that restores eligible outfit pieces and stores them back as outfits.";
+    public override string Description => "Adds a Glamour Dresser button that stores loose eligible pieces as outfit glamours.";
     public override TweakCategory Category => TweakCategory.Interface;
     public override bool DrawConfigWhenDisabled => true;
 
@@ -116,34 +118,28 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
 
         ImGui.TextColored(WarningColor, "Risk note:");
         ImGui.SameLine();
-        ImGui.TextWrapped("This is user-triggered Glamour Dresser inventory automation. Confirmed dyed pieces may lose dye state when converted into an outfit. Complete outfits may be assembled from stored outfits, loose dresser pieces, and matching inventory pieces.");
+        ImGui.TextWrapped("This is user-triggered Glamour Dresser inventory automation. Confirmed dyed pieces may lose dye state when stored into an outfit. Existing outfit pieces stay in the dresser; loose dresser pieces and matching inventory pieces may be added to new or existing outfits.");
 
         return changed;
     }
 
     protected override void OnEnable()
     {
-        if (this.openSetConvertAddon == null)
-        {
-            this.openSetConvertAddon = (delegate* unmanaged<AgentMiragePrismPrismSetConvert*, uint, InventoryType, int, int, bool, void>)this.Services.SigScanner.ScanText(OpenSetConvertSignature);
-        }
-
-        if (this.updateSetConvertAddon == null)
-        {
-            this.updateSetConvertAddon = (delegate* unmanaged<AgentMiragePrismPrismSetConvert*, uint, void>)this.Services.SigScanner.ScanText(UpdateSetConvertAddonSignature);
-        }
-
         this.Services.Framework.Update += this.OnFrameworkUpdate;
         this.Services.PluginInterface.UiBuilder.Draw += this.DrawOverlay;
         this.Services.GameInventory.InventoryChangedRaw += this.OnInventoryChanged;
         this.Services.AddonLifecycle.RegisterListener(AddonEvent.PostOpen, DresserAddonName, this.OnDresserAddonChanged);
         this.Services.AddonLifecycle.RegisterListener(AddonEvent.PostClose, DresserAddonName, this.OnDresserAddonChanged);
         this.Services.AddonLifecycle.RegisterListener(AddonEvent.PostClose, SetConvertAddonName, this.OnSetConvertClosed);
+        this.Services.AddonLifecycle.RegisterListener(AddonEvent.PostClose, SetConvertAlternateAddonName, this.OnSetConvertClosed);
+        this.Services.AddonLifecycle.RegisterListener(AddonEvent.PostReceiveEvent, SelectYesNoAddonName, this.OnSelectYesNoReceiveEvent);
         this.MarkCandidatesDirty();
     }
 
     protected override void OnDisable()
     {
+        this.Services.AddonLifecycle.UnregisterListener(AddonEvent.PostReceiveEvent, SelectYesNoAddonName, this.OnSelectYesNoReceiveEvent);
+        this.Services.AddonLifecycle.UnregisterListener(AddonEvent.PostClose, SetConvertAlternateAddonName, this.OnSetConvertClosed);
         this.Services.AddonLifecycle.UnregisterListener(AddonEvent.PostClose, SetConvertAddonName, this.OnSetConvertClosed);
         this.Services.AddonLifecycle.UnregisterListener(AddonEvent.PostClose, DresserAddonName, this.OnDresserAddonChanged);
         this.Services.AddonLifecycle.UnregisterListener(AddonEvent.PostOpen, DresserAddonName, this.OnDresserAddonChanged);
@@ -172,10 +168,26 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
             return;
         }
 
-        if (this.IsQueueActive)
+        if (this.IsQueueActive && !this.IsSetConvertOpen())
         {
             this.FailQueue("Outfit Glamour Creation closed before the queued outfit was stored.");
         }
+    }
+
+    private void OnSelectYesNoReceiveEvent(AddonEvent eventType, AddonArgs args)
+    {
+        if (!this.IsQueueActive
+            || this.currentOutfit == null
+            || args is not AddonReceiveEventArgs receiveArgs)
+        {
+            return;
+        }
+
+        this.Services.Log.Warning(
+            "Glamour Outfit Compactor observed SelectYesno event while updating {OutfitName}: type={AtkEventType}, param={EventParam}",
+            this.currentOutfit.Name,
+            receiveArgs.AtkEventType,
+            receiveArgs.EventParam);
     }
 
     private void OnInventoryChanged(IReadOnlyCollection<InventoryEventArgs> events)
@@ -311,7 +323,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
                     ImGui.BeginDisabled();
                 }
 
-                if (ImGui.Button("Convert eligible outfits"))
+                if (ImGui.Button("Update eligible outfits"))
                 {
                     this.StartQueue();
                 }
@@ -331,10 +343,10 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
                 break;
 
             case QueueStep.WaitingForDyedConfirmation:
-                ImGui.TextColored(WarningColor, "This outfit may include dyed pieces.");
+                ImGui.TextColored(WarningColor, "This update may add dyed pieces.");
                 if (ImGui.Button("Continue"))
                 {
-                    this.EnterStep(QueueStep.RestoringItems, $"Restoring {this.currentOutfit?.Name ?? "outfit"}.");
+                    this.EnterStep(QueueStep.RestoringItems, $"Restoring loose pieces for {this.currentOutfit?.Name ?? "outfit"}.");
                 }
 
                 ImGui.SameLine();
@@ -391,7 +403,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
         {
             ImGui.Spacing();
             ImGui.TextDisabled($"Current: {this.currentOutfit.Name}");
-            ImGui.TextDisabled($"{this.currentOutfit.SelectionItems.Count} piece{(this.currentOutfit.SelectionItems.Count == 1 ? string.Empty : "s")}{(this.currentOutfit.IsMerge ? " (merge)" : string.Empty)}");
+            ImGui.TextDisabled($"{this.currentOutfit.SelectionItems.Count} added piece{(this.currentOutfit.SelectionItems.Count == 1 ? string.Empty : "s")}{(this.currentOutfit.IsMerge ? " (addendum)" : string.Empty)}");
         }
 
         if (this.skippedOutfits > 0)
@@ -424,7 +436,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
         }
 
         var glamourPrismCost = this.GetRemainingGlamourPrismCost();
-        this.status = $"Queued {this.queue.Count} eligible outfit{(this.queue.Count == 1 ? string.Empty : "s")}.";
+        this.status = $"Queued {this.queue.Count} outfit update{(this.queue.Count == 1 ? string.Empty : "s")}.";
         if (glamourPrismCost > 0)
         {
             this.status += $" Requires {glamourPrismCost} Glamour Prism{(glamourPrismCost == 1 ? string.Empty : "s")}.";
@@ -446,7 +458,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
             var skippedMessage = this.skippedOutfits == 0
                 ? string.Empty
                 : $" Skipped {this.skippedOutfits} outfit{(this.skippedOutfits == 1 ? string.Empty : "s")}.";
-            this.EnterStep(QueueStep.Complete, $"Converted {this.completedOutfits} outfit{(this.completedOutfits == 1 ? string.Empty : "s")}.{skippedMessage}");
+            this.EnterStep(QueueStep.Complete, $"Updated {this.completedOutfits} outfit{(this.completedOutfits == 1 ? string.Empty : "s")}.{skippedMessage}");
             this.MarkCandidatesDirty();
             return;
         }
@@ -466,11 +478,11 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
 
         if (this.currentOutfit.RequiresConfirmation && this.ConfirmDyedOutfits)
         {
-            this.EnterStep(QueueStep.WaitingForDyedConfirmation, $"{this.currentOutfit.Name} may include dyed pieces. Confirm before continuing.");
+            this.EnterStep(QueueStep.WaitingForDyedConfirmation, $"{this.currentOutfit.Name} may add dyed pieces. Confirm before continuing.");
             return;
         }
 
-        this.EnterStep(QueueStep.RestoringItems, $"Restoring {this.currentOutfit.Name}.");
+        this.EnterStep(QueueStep.RestoringItems, $"Restoring loose pieces for {this.currentOutfit.Name}.");
     }
 
     private void AdvanceQueue()
@@ -488,9 +500,6 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
                 break;
             case QueueStep.WaitingForRestore:
                 this.WaitForRestoredItem(this.currentOutfit);
-                break;
-            case QueueStep.WaitingForSetRestore:
-                this.WaitForStoredSetRestore(this.currentOutfit);
                 break;
             case QueueStep.OpeningSetConvert:
                 this.OpenSetConvert(this.currentOutfit);
@@ -520,12 +529,6 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
             return;
         }
 
-        if (outfit.IsMerge && !outfit.StoredSetRestored)
-        {
-            this.RestoreStoredSetItems(outfit);
-            return;
-        }
-
         while (outfit.NextRestoreIndex < outfit.RestoreItems.Count
             && this.TryFindInventoryItem(outfit.RestoreItems[outfit.NextRestoreIndex].ItemId, out var existingSlot))
         {
@@ -537,7 +540,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
         {
             if (!this.TryValidateRestoredInventory(outfit, out var error))
             {
-                this.FailQueue(error ?? $"Could not find every restored piece for {outfit.Name} in inventory.");
+                this.FailQueue(error ?? $"Could not find every piece to add for {outfit.Name} in inventory.");
                 return;
             }
 
@@ -578,84 +581,11 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
         this.EnterStep(QueueStep.WaitingForRestore, $"Waiting for {item.ItemId} to return to inventory.");
     }
 
-    private void RestoreStoredSetItems(QueuedOutfit outfit)
-    {
-        var manager = MirageManager.Instance();
-        if (manager == null || !manager->PrismBoxLoaded)
-        {
-            this.status = "Waiting for Glamour Dresser data before restoring existing outfit pieces.";
-            this.nextActionAt = DateTimeOffset.UtcNow + CandidateRefreshDelay;
-            return;
-        }
-
-        var setItemIndex = this.FindPrismBoxItemIndex(outfit.SetItemId);
-        if (setItemIndex < 0)
-        {
-            this.ScheduleStoredSetRestoreRetry(
-                outfit,
-                $"Waiting for stored outfit {outfit.Name} to be available in the Glamour Dresser.",
-                $"Could not find the stored outfit {outfit.SetItemId} in the Glamour Dresser anymore.");
-            return;
-        }
-
-        byte* restoreBits = stackalloc byte[2];
-        for (var i = 0; i < 2; i++)
-        {
-            restoreBits[i] = 0;
-        }
-
-        foreach (var slotIndex in outfit.StoredSlotIndexes)
-        {
-            if (!manager->IsSetSlotUnlocked((uint)setItemIndex, slotIndex))
-            {
-                this.FailQueue($"Stored outfit {outfit.Name} changed before it could be merged.");
-                return;
-            }
-
-            restoreBits[slotIndex / 8] |= (byte)(1 << (slotIndex % 8));
-        }
-
-        if (!manager->RestorePrismBoxSetItem((uint)setItemIndex, restoreBits))
-        {
-            this.ScheduleStoredSetRestoreRetry(
-                outfit,
-                $"The game refused to restore existing pieces for {outfit.Name}; waiting briefly before retrying.",
-                "The game refused to restore the existing stored outfit. Inventory may be full or a unique item may already be owned.");
-            return;
-        }
-
-        this.ClearRestoreRetryState();
-        outfit.StoredSetRestored = true;
-        this.EnterStep(QueueStep.WaitingForSetRestore, $"Waiting for existing {outfit.Name} outfit pieces to return to inventory.");
-    }
-
-    private void WaitForStoredSetRestore(QueuedOutfit outfit)
-    {
-        foreach (var itemId in outfit.StoredSetItemIds)
-        {
-            if (!this.TryFindInventoryItem(itemId, out var restoredSlot))
-            {
-                this.nextActionAt = DateTimeOffset.UtcNow + CandidateRefreshDelay;
-                return;
-            }
-
-            this.AddRestoredSlot(outfit, restoredSlot);
-        }
-
-        if (this.FindPrismBoxItemIndex(outfit.SetItemId) >= 0)
-        {
-            this.nextActionAt = DateTimeOffset.UtcNow + CandidateRefreshDelay;
-            return;
-        }
-
-        this.EnterStep(QueueStep.RestoringItems, $"Restoring loose pieces for {outfit.Name}.");
-    }
-
     private void WaitForRestoredItem(QueuedOutfit outfit)
     {
         if (this.waitingForRestoredItemId == null)
         {
-            this.EnterStep(QueueStep.RestoringItems, $"Restoring {outfit.Name}.");
+            this.EnterStep(QueueStep.RestoringItems, $"Restoring loose pieces for {outfit.Name}.");
             return;
         }
 
@@ -669,7 +599,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
         outfit.NextRestoreIndex++;
         this.waitingForRestoredItemId = null;
         this.ClearRestoreRetryState();
-        this.EnterStep(QueueStep.RestoringItems, $"Restoring {outfit.Name}.");
+        this.EnterStep(QueueStep.RestoringItems, $"Restoring loose pieces for {outfit.Name}.");
     }
 
     private void AddRestoredSlot(QueuedOutfit outfit, InventorySlot slot)
@@ -704,7 +634,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
         var sourceItem = outfit.SelectionItems.FirstOrDefault(item => this.TryFindInventoryItem(item.ItemId, out _));
         if (sourceItem == null || !this.TryFindInventoryItem(sourceItem.ItemId, out var sourceSlot))
         {
-            this.FailQueue("Could not find a restored outfit piece in inventory.");
+            this.FailQueue("Could not find an outfit piece to add in inventory.");
             return;
         }
 
@@ -730,11 +660,11 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
                 sourceSlot.ItemId,
                 sourceSlot.InventoryType,
                 sourceSlot.Slot);
-            this.openSetConvertAddon(agent, sourceSlot.ItemId, sourceSlot.InventoryType, (int)sourceSlot.Slot, dresserAddon.Id, true);
+            agent->Open(sourceSlot.ItemId, sourceSlot.InventoryType, (int)sourceSlot.Slot, dresserAddon.Id, true);
         }
         catch (Exception ex)
         {
-            this.FailQueue("Failed to open Outfit Glamour Creation for the restored outfit piece.");
+            this.FailQueue("Failed to open Outfit Glamour Creation for the outfit piece to add.");
             this.Services.Log.Warning(ex, "Failed to open Outfit Glamour Creation for {OutfitName} from item {ItemId}", outfit.Name, sourceSlot.ItemId);
             return;
         }
@@ -744,6 +674,16 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
 
     private void FillSetConvert(QueuedOutfit outfit)
     {
+        if (this.TryHandleAddendumPrompt(outfit, out var promptError) || promptError != null)
+        {
+            if (promptError != null)
+            {
+                this.FailQueue(promptError);
+            }
+
+            return;
+        }
+
         if (!this.IsSetConvertOpen())
         {
             this.nextActionAt = DateTimeOffset.UtcNow + CandidateRefreshDelay;
@@ -767,6 +707,16 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
 
     private void ValidateSetConvert(QueuedOutfit outfit)
     {
+        if (this.TryHandleAddendumPrompt(outfit, out var promptError) || promptError != null)
+        {
+            if (promptError != null)
+            {
+                this.FailQueue(promptError);
+            }
+
+            return;
+        }
+
         if (!this.IsSetConvertOpen())
         {
             this.nextActionAt = DateTimeOffset.UtcNow + CandidateRefreshDelay;
@@ -805,7 +755,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
     {
         if (!this.AttemptNativeStoreClick)
         {
-            this.FailQueue("Automatic native Store click is disabled. The restored items are selected in the Outfit Glamour Creation window.");
+            this.FailQueue("Automatic native Store click is disabled. The pieces to add are selected in the Outfit Glamour Creation window.");
             return;
         }
 
@@ -821,14 +771,13 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
             return;
         }
 
-        var setConvertAddon = this.Services.GameGui.GetAddonByName(SetConvertAddonName, 1);
-        if (setConvertAddon.IsNull || setConvertAddon.Address == IntPtr.Zero || !setConvertAddon.IsReady || !setConvertAddon.IsVisible)
+        if (!this.TryGetSetConvertAddon(out var addon))
         {
             this.FailQueue("Outfit Glamour Creation addon is not ready for the native Store button.");
             return;
         }
 
-        if (!this.TryClickButton((AtkUnitBase*)setConvertAddon.Address, StoreAsGlamourButtonId))
+        if (!this.TryClickButton(addon, StoreAsGlamourButtonId))
         {
             this.FailQueue("The native Store as Glamour button was not available.");
             return;
@@ -840,7 +789,10 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
     private void ConfirmStoreOutfit(QueuedOutfit outfit)
     {
         var manager = MirageManager.Instance();
-        if (manager != null && manager->PrismBoxLoaded && manager->PrismBoxItemIds.Contains(outfit.SetItemId))
+        if (!outfit.IsNativeAddendum
+            && manager != null
+            && manager->PrismBoxLoaded
+            && manager->PrismBoxItemIds.Contains(outfit.SetItemId))
         {
             this.EnterStep(QueueStep.WaitingForStore, $"Waiting for {outfit.Name} to appear in the Glamour Dresser.");
             return;
@@ -905,7 +857,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
 
         if (outfit.RestoredSlots.Count == 0 || outfit.RestoredSlots.Any(slot => !this.IsInventorySlotConsumed(slot)))
         {
-            this.status = $"Waiting for restored pieces to leave inventory after storing {outfit.Name}.";
+            this.status = $"Waiting for added pieces to leave inventory after storing {outfit.Name}.";
             this.nextActionAt = DateTimeOffset.UtcNow + CandidateRefreshDelay;
             return;
         }
@@ -919,13 +871,16 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
     {
         error = null;
 
-        var setConvertAddon = this.Services.GameGui.GetAddonByName(SetConvertAddonName, 1);
-        if (setConvertAddon.IsNull || setConvertAddon.Address == IntPtr.Zero || !setConvertAddon.IsReady || !setConvertAddon.IsVisible)
+        if (this.TryHandleAddendumPrompt(outfit, out error) || error != null)
         {
             return false;
         }
 
-        var addon = (AtkUnitBase*)setConvertAddon.Address;
+        if (!this.TryGetSetConvertAddon(out var addon))
+        {
+            return false;
+        }
+
         if (!this.TryReadSetConvertUiItems(addon, out var dataItems, out error))
         {
             return false;
@@ -1056,7 +1011,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
         outfit.SetConvertOutfitSwitchAttempted = true;
         this.pendingSetConvertSlot = null;
         this.pendingSetConvertItemId = null;
-        this.updateSetConvertAddon(agent, SetConvertRefreshFlags);
+        agent->Update(SetConvertRefreshFlags);
         this.status = $"Switching Outfit Glamour Creation to {outfit.Name}.";
         this.nextActionAt = DateTimeOffset.UtcNow + CandidateRefreshDelay;
         this.Services.Log.Debug(
@@ -1068,19 +1023,24 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
 
     private static void SetSetConvertItemSlotIndex(ref AgentMiragePrismPrismSetConvert.AgentData.ItemSetItem item, uint slotIndex)
     {
+        // Current FFXIVClientStructs exposes SlotIndex as private; the generated layout places it at 0x08.
         var itemPtr = (byte*)Unsafe.AsPointer(ref item);
         *(uint*)(itemPtr + 8) = slotIndex;
     }
 
     private string GetSetConvertFillDiagnostic(QueuedOutfit outfit)
     {
-        var setConvertAddon = this.Services.GameGui.GetAddonByName(SetConvertAddonName, 1);
-        if (setConvertAddon.IsNull || setConvertAddon.Address == IntPtr.Zero)
+        if (this.TryGetSelectYesNoAddon(out var selectYesNoAddon)
+            && IsAddendumPrompt(GetSelectYesNoPromptText(selectYesNoAddon)))
         {
-            return "Outfit Glamour Creation addon was not available.";
+            return $"Waiting on addendum confirmation prompt after {outfit.AddendumPromptAttempts} attempt(s). {GetSelectYesNoDiagnostic((AtkUnitBase*)selectYesNoAddon)}";
         }
 
-        var addon = (AtkUnitBase*)setConvertAddon.Address;
+        if (!this.TryGetSetConvertAddon(out var addon))
+        {
+            return $"Outfit Glamour Creation addon was not available. Checked {SetConvertAddonName} and {SetConvertAlternateAddonName}.";
+        }
+
         if (!this.TryReadSetConvertUiItems(addon, out var dataItems, out var error))
         {
             return error ?? "Outfit Glamour Creation UI data was not loaded.";
@@ -1112,13 +1072,16 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
     {
         error = null;
 
-        var setConvertAddon = this.Services.GameGui.GetAddonByName(SetConvertAddonName, 1);
-        if (setConvertAddon.IsNull || setConvertAddon.Address == IntPtr.Zero || !setConvertAddon.IsReady || !setConvertAddon.IsVisible)
+        if (this.TryHandleAddendumPrompt(outfit, out error) || error != null)
         {
             return false;
         }
 
-        var addon = (AtkUnitBase*)setConvertAddon.Address;
+        if (!this.TryGetSetConvertAddon(out var addon))
+        {
+            return false;
+        }
+
         if (!this.TryReadSetConvertUiItems(addon, out var dataItems, out error))
         {
             return false;
@@ -1144,7 +1107,15 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
             return false;
         }
 
-        if (dataItems.Any(item => !expectedItems.Contains(item.ItemId) && item.InventoryType != (uint)InventoryType.Invalid))
+        if (!this.TryValidateStoredOutfit(outfit, out error))
+        {
+            return false;
+        }
+
+        var allowedSelectedItems = outfit.NativeAddendumAccepted
+            ? outfit.SetItemIds.ToHashSet()
+            : expectedItems.Concat(outfit.StoredSetItemIds).ToHashSet();
+        if (dataItems.Any(item => !allowedSelectedItems.Contains(item.ItemId) && item.InventoryType != (uint)InventoryType.Invalid))
         {
             return false;
         }
@@ -1165,6 +1136,189 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
 
             if (!this.IsSetConvertUiItemSelected(selectedItem, slot))
             {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private bool TryHandleAddendumPrompt(QueuedOutfit outfit, out string? error)
+    {
+        error = null;
+
+        if (!this.TryGetSelectYesNoAddon(out var addon))
+        {
+            return false;
+        }
+
+        var prompt = GetSelectYesNoPromptText(addon);
+        if (!IsAddendumPrompt(prompt))
+        {
+            return false;
+        }
+
+        if (!this.TryValidateStoredOutfit(outfit, out error))
+        {
+            return error == null;
+        }
+
+        var unitBase = (AtkUnitBase*)addon;
+        outfit.AddendumPromptAttempts++;
+        var method = this.TryConfirmAddendumPrompt(unitBase, outfit.AddendumPromptAttempts);
+        if (method == null)
+        {
+            this.status = $"Waiting for addendum prompt controls for {outfit.Name}.";
+            this.nextActionAt = DateTimeOffset.UtcNow + CandidateRefreshDelay;
+            this.Services.Log.Warning(
+                "Glamour Outfit Compactor could not confirm addendum prompt for {OutfitName}: attempt={Attempt}, {Diagnostic}",
+                outfit.Name,
+                outfit.AddendumPromptAttempts,
+                GetSelectYesNoDiagnostic(unitBase));
+            return true;
+        }
+
+        this.status = $"Confirming addendum prompt for {outfit.Name} ({method}).";
+        outfit.NativeAddendumAccepted = true;
+        this.nextActionAt = DateTimeOffset.UtcNow + CandidateRefreshDelay;
+        this.Services.Log.Warning(
+            "Glamour Outfit Compactor tried addendum prompt confirmation for {OutfitName}: attempt={Attempt}, method={Method}, {Diagnostic}",
+            outfit.Name,
+            outfit.AddendumPromptAttempts,
+            method,
+            GetSelectYesNoDiagnostic(unitBase));
+        return true;
+    }
+
+    private string? TryConfirmAddendumPrompt(AtkUnitBase* addon, int attempt)
+    {
+        switch (attempt)
+        {
+            case 1:
+            case 2:
+                return this.TryClickButton(addon, SelectYesNoYesButtonId)
+                    ? $"button {SelectYesNoYesButtonId}"
+                    : null;
+            case 3:
+                this.FireSelectYesNoCallback(addon, 0);
+                return "callback [0]";
+            case 4:
+                this.FireSelectYesNoCallback(addon, 0, 0);
+                return "callback [0,0]";
+            default:
+                this.FireSelectYesNoCallback(addon, 0, 1);
+                return "callback [0,1]";
+        }
+    }
+
+    private bool TryGetSelectYesNoAddon(out AddonSelectYesno* addon)
+    {
+        if (this.TryGetSelectYesNoAddonByName(SelectYesNoAddonName, out addon))
+        {
+            return true;
+        }
+
+        return this.TryGetSelectYesNoAddonByName(SelectYesNoAlternateAddonName, out addon);
+    }
+
+    private bool TryGetSelectYesNoAddonByName(string addonName, out AddonSelectYesno* addon)
+    {
+        var addonHandle = this.Services.GameGui.GetAddonByName(addonName, 1);
+        if (addonHandle.IsNull
+            || addonHandle.Address == IntPtr.Zero
+            || !addonHandle.IsReady
+            || !addonHandle.IsVisible)
+        {
+            addon = null;
+            return false;
+        }
+
+        addon = (AddonSelectYesno*)addonHandle.Address;
+        return true;
+    }
+
+    private static bool IsAddendumPrompt(string prompt)
+    {
+        var normalizedPrompt = NormalizePromptText(prompt);
+        return normalizedPrompt.Contains(AddendumPromptFirstLine, StringComparison.Ordinal)
+            && normalizedPrompt.Contains(AddendumPromptSecondLine, StringComparison.Ordinal);
+    }
+
+    private static string NormalizePromptText(string prompt)
+    {
+        return new string(prompt
+            .Replace("\r\n", "\n", StringComparison.Ordinal)
+            .Replace('\r', '\n')
+            .Select(character => char.IsControl(character) ? '\n' : character)
+            .ToArray())
+            .Trim();
+    }
+
+    private static string GetSelectYesNoPromptText(AddonSelectYesno* addon)
+    {
+        var unitBase = (AtkUnitBase*)addon;
+        if (unitBase->AtkValues != null && unitBase->AtkValuesCount > 0)
+        {
+            var valueText = ReadAtkValueString(unitBase->AtkValues[0]);
+            if (!string.IsNullOrWhiteSpace(valueText))
+            {
+                return valueText;
+            }
+        }
+
+        return addon->PromptText == null
+            ? string.Empty
+            : addon->PromptText->NodeText.ToString();
+    }
+
+    private static string ReadAtkValueString(AtkValue value)
+    {
+        return value.Type switch
+        {
+            AtkValueType.String or AtkValueType.String8 or AtkValueType.ManagedString => value.String.ToString(),
+            AtkValueType.WideString => value.WideString == null ? string.Empty : new string(value.WideString),
+            _ => string.Empty
+        };
+    }
+
+    private static string GetSelectYesNoDiagnostic(AtkUnitBase* addon)
+    {
+        var yesButton = addon->GetComponentButtonById(SelectYesNoYesButtonId);
+        var yesDiagnostic = yesButton == null
+            ? "yesButton=null"
+            : $"yesButton=enabled:{yesButton->IsEnabled}, visible:{(yesButton->AtkResNode != null && yesButton->AtkResNode->IsVisible())}";
+
+        var prompt = NormalizePromptText(GetSelectYesNoPromptText((AddonSelectYesno*)addon))
+            .Replace("\n", " ", StringComparison.Ordinal);
+        return $"addonId={addon->Id}, values={addon->AtkValuesCount}, {yesDiagnostic}, prompt=\"{prompt}\"";
+    }
+
+    private bool TryValidateStoredOutfit(QueuedOutfit outfit, out string? error)
+    {
+        error = null;
+        if (!outfit.IsMerge)
+        {
+            return true;
+        }
+
+        var manager = MirageManager.Instance();
+        if (manager == null || !manager->PrismBoxLoaded)
+        {
+            return false;
+        }
+
+        var setItemIndex = this.FindPrismBoxItemIndex(outfit.SetItemId);
+        if (setItemIndex < 0)
+        {
+            error = $"Stored outfit {outfit.Name} is no longer in the Glamour Dresser.";
+            return false;
+        }
+
+        foreach (var slotIndex in outfit.StoredSlotIndexes)
+        {
+            if (!manager->IsSetSlotUnlocked((uint)setItemIndex, slotIndex))
+            {
+                error = $"Stored outfit {outfit.Name} changed before it could be updated.";
                 return false;
             }
         }
@@ -1274,6 +1428,19 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
         addon->FireCallback(2, values, true);
     }
 
+    private void FireSelectYesNoCallback(AtkUnitBase* addon, int response, int? extraValue = null)
+    {
+        var valueCount = extraValue == null ? 1u : 2u;
+        var values = stackalloc AtkValue[(int)valueCount];
+        values[0] = this.CreateAtkInt(response);
+        if (extraValue != null)
+        {
+            values[1] = this.CreateAtkInt(extraValue.Value);
+        }
+
+        addon->FireCallback(valueCount, values, true);
+    }
+
     private void FireContextIconMenuCallback(AtkUnitBase* addon)
     {
         var values = stackalloc AtkValue[5];
@@ -1328,31 +1495,10 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
             MaxRestoreAttempts);
     }
 
-    private void ScheduleStoredSetRestoreRetry(QueuedOutfit outfit, string retryStatus, string finalError)
-    {
-        this.storedSetRestoreRetryAttempts++;
-        if (this.storedSetRestoreRetryAttempts >= MaxRestoreAttempts)
-        {
-            this.FailQueue($"{finalError} Retried {MaxRestoreAttempts} times.");
-            return;
-        }
-
-        this.status = $"{retryStatus} Retrying attempt {this.storedSetRestoreRetryAttempts + 1}/{MaxRestoreAttempts}.";
-        this.nextActionAt = DateTimeOffset.UtcNow + RestoreRetryDelay;
-        this.MarkCandidatesDirty();
-        this.Services.Log.Debug(
-            "Glamour Outfit Compactor stored outfit restore retry for {OutfitName} ({SetItemId}): attempt {NextAttempt}/{MaxAttempts}",
-            outfit.Name,
-            outfit.SetItemId,
-            this.storedSetRestoreRetryAttempts + 1,
-            MaxRestoreAttempts);
-    }
-
     private void ClearRestoreRetryState()
     {
         this.restoreRetryItemId = null;
         this.restoreRetryAttempts = 0;
-        this.storedSetRestoreRetryAttempts = 0;
     }
 
     private void SkipCurrentOutfit(string message)
@@ -1521,7 +1667,6 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
                 var inventoryItemIds = new List<uint>();
                 var storedSlotIndexes = new List<int>();
                 var storedSetItemIds = new List<uint>();
-                var missingSlot = false;
 
                 foreach (var setSlot in setSlots)
                 {
@@ -1531,13 +1676,11 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
 
                     if (!storedInOutfit && !hasLooseItem && !hasInventoryItem)
                     {
-                        missingSlot = true;
-                        break;
+                        continue;
                     }
 
                     if (storedInOutfit)
                     {
-                        selectionItems.Add(new CandidateItem(setSlot.ItemId, false));
                         storedSlotIndexes.Add(setSlot.SlotIndex);
                         storedSetItemIds.Add(setSlot.ItemId);
                         continue;
@@ -1554,19 +1697,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
                     inventoryItemIds.Add(setSlot.ItemId);
                 }
 
-                if (missingSlot)
-                {
-                    continue;
-                }
-
-                if (hasStoredOutfit)
-                {
-                    if (storedSlotIndexes.Count == 0 || restoreItems.Count + inventoryItemIds.Count == 0)
-                    {
-                        continue;
-                    }
-                }
-                else if (restoreItems.Count + inventoryItemIds.Count != setSlots.Length)
+                if (selectionItems.Count == 0)
                 {
                     continue;
                 }
@@ -1581,13 +1712,15 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
                     inventoryItemIds.ToArray(),
                     storedSlotIndexes.ToArray(),
                     storedSetItemIds.ToArray(),
-                    selectionItems.Any(item => item.Dyed) || hasStoredOutfit));
+                    selectionItems.Any(item => item.Dyed)));
             }
         }
 
         var reservedItems = new HashSet<uint>();
         foreach (var candidate in rawCandidates
-            .OrderByDescending(candidate => candidate.SelectionItems.Count)
+            .OrderByDescending(candidate => candidate.IsMerge)
+            .ThenByDescending(candidate => candidate.SelectionItems.Count + candidate.StoredSetItemIds.Length)
+            .ThenByDescending(candidate => candidate.SelectionItems.Count)
             .ThenBy(candidate => candidate.Name, StringComparer.OrdinalIgnoreCase)
             .ThenBy(candidate => candidate.SetItemId))
         {
@@ -1615,11 +1748,11 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
             var mergeCount = this.candidates.Count(candidate => candidate.IsMerge);
             if (this.candidates.Count == 0)
             {
-                this.status = "No complete outfit candidates found.";
+                this.status = "No outfit candidates found.";
             }
             else
             {
-                this.status = $"{this.candidates.Count} complete outfit{(this.candidates.Count == 1 ? string.Empty : "s")} can be compacted{(mergeCount == 0 ? "." : $" ({mergeCount} merge{(mergeCount == 1 ? string.Empty : "s")}).")}";
+                this.status = $"{this.candidates.Count} outfit update{(this.candidates.Count == 1 ? string.Empty : "s")} can be compacted{(mergeCount == 0 ? "." : $" ({mergeCount} addendum{(mergeCount == 1 ? string.Empty : "s")}).")}";
             }
         }
     }
@@ -1724,7 +1857,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
 
     private bool HasStartedRestoring(QueuedOutfit outfit)
     {
-        return outfit.StoredSetRestored || outfit.RestoredSlots.Count > 0 || outfit.NextRestoreIndex > 0 || this.waitingForRestoredItemId != null;
+        return outfit.RestoredSlots.Count > 0 || outfit.NextRestoreIndex > 0 || this.waitingForRestoredItemId != null;
     }
 
     private bool TryStopQueueWithoutEnoughGlamourPrisms()
@@ -1899,8 +2032,33 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
 
     private bool IsSetConvertOpen()
     {
-        var addon = this.Services.GameGui.GetAddonByName(SetConvertAddonName, 1);
-        return !addon.IsNull && addon.IsReady && addon.IsVisible;
+        return this.TryGetSetConvertAddon(out _);
+    }
+
+    private bool TryGetSetConvertAddon(out AtkUnitBase* addon)
+    {
+        if (this.TryGetVisibleAddon(SetConvertAddonName, out addon))
+        {
+            return true;
+        }
+
+        return this.TryGetVisibleAddon(SetConvertAlternateAddonName, out addon);
+    }
+
+    private bool TryGetVisibleAddon(string addonName, out AtkUnitBase* addon)
+    {
+        var handle = this.Services.GameGui.GetAddonByName(addonName, 1);
+        if (handle.IsNull
+            || handle.Address == IntPtr.Zero
+            || !handle.IsReady
+            || !handle.IsVisible)
+        {
+            addon = null;
+            return false;
+        }
+
+        addon = (AtkUnitBase*)handle.Address;
+        return true;
     }
 
     private bool TryClickButton(AtkUnitBase* addon, uint buttonId, System.Action? beforeClick = null)
@@ -1911,13 +2069,21 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
         }
 
         var button = addon->GetComponentButtonById(buttonId);
-        if (button == null || !button->IsEnabled || button->AtkResNode == null || !button->AtkResNode->IsVisible())
+        return this.TryClickButton(addon, button, beforeClick);
+    }
+
+    private bool TryClickButton(AtkUnitBase* addon, AtkComponentButton* button, System.Action? beforeClick = null)
+    {
+        if (addon == null || button == null)
         {
             return false;
         }
 
         var ownerNode = button->AtkComponentBase.OwnerNode;
-        if (ownerNode == null)
+        if (ownerNode == null
+            || button->AtkResNode == null
+            || !button->AtkResNode->IsVisible()
+            || !button->IsEnabled)
         {
             return false;
         }
@@ -2071,9 +2237,8 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
         return queueStep switch
         {
             QueueStep.WaitingForDyedConfirmation => "waiting for dyed outfit confirmation",
-            QueueStep.RestoringItems => "restoring outfit pieces",
+            QueueStep.RestoringItems => "restoring loose outfit pieces",
             QueueStep.WaitingForRestore => "waiting for inventory updates",
-            QueueStep.WaitingForSetRestore => "waiting for stored outfit pieces",
             QueueStep.OpeningSetConvert => "opening Outfit Glamour Creation",
             QueueStep.FillingSetConvert => "filling Outfit Glamour Creation",
             QueueStep.ValidatingSetConvert => "validating selected outfit pieces",
@@ -2090,7 +2255,6 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
         WaitingForDyedConfirmation,
         RestoringItems,
         WaitingForRestore,
-        WaitingForSetRestore,
         OpeningSetConvert,
         FillingSetConvert,
         ValidatingSetConvert,
@@ -2170,10 +2334,12 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
         public bool RequiresConfirmation { get; }
         public int GlamourPrismCost { get; }
         public bool IsMerge => this.StoredSlotIndexes.Length > 0;
+        public bool IsNativeAddendum => this.IsMerge || this.NativeAddendumAccepted;
         public List<InventorySlot> RestoredSlots { get; } = [];
         public int NextRestoreIndex { get; set; }
-        public bool StoredSetRestored { get; set; }
         public bool SetConvertOutfitSwitchAttempted { get; set; }
+        public int AddendumPromptAttempts { get; set; }
+        public bool NativeAddendumAccepted { get; set; }
     }
 
     private sealed class CandidateItem
