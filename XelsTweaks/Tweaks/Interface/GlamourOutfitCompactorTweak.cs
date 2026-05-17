@@ -660,7 +660,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
                 sourceSlot.ItemId,
                 sourceSlot.InventoryType,
                 sourceSlot.Slot);
-            agent->Open(sourceSlot.ItemId, sourceSlot.InventoryType, (int)sourceSlot.Slot, dresserAddon.Id, true);
+            agent->Open(sourceSlot.ItemId, sourceSlot.InventoryType, (int)sourceSlot.Slot, dresserAddon.Id, 0, true);
         }
         catch (Exception ex)
         {
