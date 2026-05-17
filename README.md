@@ -1,6 +1,6 @@
 # XelsTweaks
 
-XelsTweaks is a scaffold for a modular Dalamud tweak hub, similar in shape to plugins such as SimpleTweaks, HaselTweaks, and Pandora.
+XelsTweaks is a modular Dalamud tweak hub for small opt-in quality-of-life features.
 
 The first version contains the plugin shell, config window, tweak manager, and Auto Login tweak.
 
