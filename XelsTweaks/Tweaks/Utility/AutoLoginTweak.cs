@@ -28,7 +28,6 @@ internal sealed unsafe class AutoLoginTweak : TweakBase
 
     private static readonly TimeSpan StartupDelay = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan RetryDelay = TimeSpan.FromSeconds(2);
-    private static readonly TimeSpan StartupTimeout = TimeSpan.FromSeconds(45);
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         PropertyNameCaseInsensitive = true
@@ -37,9 +36,7 @@ internal sealed unsafe class AutoLoginTweak : TweakBase
     private static bool isDisarmedForProcess;
 
     private readonly LifestreamIpc lifestreamIpc;
-    private DateTimeOffset enabledAt;
     private DateTimeOffset nextAttemptAt;
-    private DateTimeOffset? lifestreamAvailableAt;
     private bool hasAttemptedThisSession;
     private bool disarmedForSession;
 
@@ -119,9 +116,7 @@ internal sealed unsafe class AutoLoginTweak : TweakBase
 
     protected override void OnEnable()
     {
-        this.enabledAt = DateTimeOffset.UtcNow;
-        this.nextAttemptAt = this.enabledAt + StartupDelay;
-        this.lifestreamAvailableAt = null;
+        this.nextAttemptAt = DateTimeOffset.UtcNow + StartupDelay;
         this.hasAttemptedThisSession = false;
         this.disarmedForSession = this.Services.ClientState.IsLoggedIn || isDisarmedForProcess;
         this.Services.Framework.Update += this.OnFrameworkUpdate;
@@ -175,7 +170,7 @@ internal sealed unsafe class AutoLoginTweak : TweakBase
         }
 
         this.nextAttemptAt = now + RetryDelay;
-        this.TryStartLogin(selectedCharacter, now);
+        this.TryStartLogin(selectedCharacter);
     }
 
     private void OnLogin()
@@ -183,23 +178,21 @@ internal sealed unsafe class AutoLoginTweak : TweakBase
         this.DisarmForSession("Logged in; automatic login will not run again this session.");
     }
 
-    private void TryStartLogin(CachedCharacter selectedCharacter, DateTimeOffset now)
+    private void TryStartLogin(CachedCharacter selectedCharacter)
     {
         if (!this.lifestreamIpc.TryCanAutoLogin(out var canAutoLogin, out var error))
         {
+            if (this.IsRequirementMet && !this.lifestreamIpc.CanAutoLoginAvailable)
+            {
+                this.SetWaitingStatus("Waiting for Lifestream to finish loading.");
+                return;
+            }
+
             this.SetWaitingError(error);
             return;
         }
 
-        this.lifestreamAvailableAt ??= now;
         this.SetLastError(null);
-        if (now - this.lifestreamAvailableAt > StartupTimeout)
-        {
-            this.DisarmForSession("Lifestream did not accept the login request in time.");
-            this.SetLastError("Timed out before Lifestream accepted the login request.");
-            return;
-        }
-
         if (!canAutoLogin)
         {
             this.SetStatus("Waiting for Lifestream to allow automatic login.");
@@ -361,12 +354,18 @@ internal sealed unsafe class AutoLoginTweak : TweakBase
     {
         if (string.IsNullOrWhiteSpace(error))
         {
-            this.SetStatus("Waiting for Lifestream to accept the login request.");
+            this.SetWaitingStatus("Waiting for Lifestream to accept the login request.");
             return;
         }
 
         this.SetLastError(error);
         this.SetStatus(error);
+    }
+
+    private void SetWaitingStatus(string status)
+    {
+        this.SetLastError(null);
+        this.SetStatus(status);
     }
 
     private void SetStatus(string status)

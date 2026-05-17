@@ -21,6 +21,8 @@ internal sealed class LifestreamIpc
         this.initiateLoginFromCharaSelectScreen = pluginInterface.GetIpcSubscriber<string, string, bool>("Lifestream.InitiateLoginFromCharaSelectScreen");
     }
 
+    public bool CanAutoLoginAvailable => this.canAutoLogin.HasFunction;
+
     public bool TryCanAutoLogin(out bool result, out string? error)
     {
         return TryInvoke(this.canAutoLogin, "Lifestream auto-login", out result, out error);
