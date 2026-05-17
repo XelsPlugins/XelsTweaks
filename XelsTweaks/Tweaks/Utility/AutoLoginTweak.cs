@@ -34,6 +34,7 @@ internal sealed unsafe class AutoLoginTweak : TweakBase
     private readonly LifestreamIpc lifestreamIpc;
     private DateTimeOffset enabledAt;
     private DateTimeOffset nextAttemptAt;
+    private DateTimeOffset? lifestreamAvailableAt;
     private bool hasAttemptedThisSession;
     private bool disarmedForSession;
 
@@ -114,6 +115,7 @@ internal sealed unsafe class AutoLoginTweak : TweakBase
     {
         this.enabledAt = DateTimeOffset.UtcNow;
         this.nextAttemptAt = this.enabledAt + StartupDelay;
+        this.lifestreamAvailableAt = null;
         this.hasAttemptedThisSession = false;
         this.disarmedForSession = this.Services.ClientState.IsLoggedIn || isDisarmedForProcess;
         this.Services.Framework.Update += this.OnFrameworkUpdate;
@@ -166,15 +168,8 @@ internal sealed unsafe class AutoLoginTweak : TweakBase
             return;
         }
 
-        if (now - this.enabledAt > StartupTimeout)
-        {
-            this.DisarmForSession("Auto Login timed out while waiting for Lifestream.");
-            this.SetLastError("Timed out before Lifestream accepted the login request.");
-            return;
-        }
-
         this.nextAttemptAt = now + RetryDelay;
-        this.TryStartLogin(selectedCharacter);
+        this.TryStartLogin(selectedCharacter, now);
     }
 
     private void OnLogin()
@@ -182,11 +177,20 @@ internal sealed unsafe class AutoLoginTweak : TweakBase
         this.DisarmForSession("Logged in; Auto Login is disarmed for this game session.");
     }
 
-    private void TryStartLogin(CachedCharacter selectedCharacter)
+    private void TryStartLogin(CachedCharacter selectedCharacter, DateTimeOffset now)
     {
         if (!this.lifestreamIpc.TryCanAutoLogin(out var canAutoLogin, out var error))
         {
             this.SetWaitingError(error);
+            return;
+        }
+
+        this.lifestreamAvailableAt ??= now;
+        this.SetLastError(null);
+        if (now - this.lifestreamAvailableAt > StartupTimeout)
+        {
+            this.DisarmForSession("Auto Login timed out after Lifestream became available.");
+            this.SetLastError("Timed out before Lifestream accepted the login request.");
             return;
         }
 
