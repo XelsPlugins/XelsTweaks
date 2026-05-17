@@ -112,7 +112,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
 
         ImGui.TextColored(WarningColor, "Risk note:");
         ImGui.SameLine();
-        ImGui.TextWrapped("This is user-triggered Glamour Dresser inventory automation. Confirmed dyed pieces may lose dye state when converted into an outfit. Complete loose dresser pieces are restored before storing the completed outfit; partial stored outfits may be merged only when the stored outfit already exists in the dresser.");
+        ImGui.TextWrapped("This is user-triggered Glamour Dresser inventory automation. Confirmed dyed pieces may lose dye state when converted into an outfit. Complete outfits may be assembled from stored outfits, loose dresser pieces, and matching inventory pieces.");
 
         return changed;
     }
@@ -679,7 +679,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
         {
             if (!this.TryFindInventoryItem(item.ItemId, out var slot))
             {
-                error = $"Missing restored item {item.ItemId} from inventory. Stopped before opening Outfit Glamour Creation.";
+                error = $"Missing required item {item.ItemId} from inventory. Stopped before opening Outfit Glamour Creation.";
                 return false;
             }
 
@@ -965,7 +965,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
 
             if (!this.TryFindInventoryItem(item.ItemId, out var slot))
             {
-                error = $"Missing restored item {item.ItemId} from inventory.";
+                error = $"Missing required item {item.ItemId} from inventory.";
                 return false;
             }
 
@@ -977,7 +977,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
             this.FireSetConvertHandOverCallback(addon, item.Index);
             this.pendingSetConvertSlot = item.Index;
             this.pendingSetConvertItemId = item.ItemId;
-            this.status = $"Selecting restored item {item.ItemId} for {outfit.Name}.";
+            this.status = $"Selecting item {item.ItemId} for {outfit.Name}.";
             this.Services.Log.Debug(
                 "Glamour Outfit Compactor requested native handover for {OutfitName}: item {ItemId}, UI slot {UiSlot}, inventory {InventoryType}:{InventorySlot}",
                 outfit.Name,
@@ -1076,7 +1076,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
 
             if (!this.TryFindInventoryItem(expectedItemId, out var slot))
             {
-                error = $"Missing restored item {expectedItemId} from inventory.";
+                error = $"Missing required item {expectedItemId} from inventory.";
                 return false;
             }
 
@@ -1369,6 +1369,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
         this.lastPrismBoxItemIds = manager->PrismBoxItemIds.ToArray();
 
         var itemIndexes = new Dictionary<uint, int>();
+        var inventoryItems = this.GetInventoryCandidateItems();
         var setSheet = this.Services.DataManager.GetExcelSheet<MirageStoreSetItem>();
         var lookupSheet = this.Services.DataManager.GetExcelSheet<MirageStoreSetItemLookup>();
         var itemSheet = this.Services.DataManager.GetExcelSheet<Item>();
@@ -1386,7 +1387,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
 
         var rawCandidates = new List<OutfitCandidate>();
         var checkedSetIds = new HashSet<uint>();
-        foreach (var itemId in itemIndexes.Keys)
+        foreach (var itemId in itemIndexes.Keys.Concat(inventoryItems.Keys).Distinct())
         {
             if (!lookupSheet.TryGetRow(itemId, out var lookupRow))
             {
@@ -1434,6 +1435,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
                 var hasStoredOutfit = !rowIdIsSetPiece && itemIndexes.TryGetValue(setItemId, out storedSetIndex);
                 var selectionItems = new List<CandidateItem>();
                 var restoreItems = new List<CandidateItem>();
+                var inventoryItemIds = new List<uint>();
                 var storedSlotIndexes = new List<int>();
                 var storedSetItemIds = new List<uint>();
                 var missingSlot = false;
@@ -1441,26 +1443,32 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
                 foreach (var setSlot in setSlots)
                 {
                     var hasLooseItem = this.TryCreateCandidateItem(setSlot.ItemId, itemIndexes, manager, out var looseItem);
+                    var hasInventoryItem = inventoryItems.TryGetValue(setSlot.ItemId, out var inventoryItem);
                     var storedInOutfit = hasStoredOutfit && manager->IsSetSlotUnlocked((uint)storedSetIndex, setSlot.SlotIndex);
 
-                    if (!hasLooseItem && !storedInOutfit)
+                    if (!storedInOutfit && !hasLooseItem && !hasInventoryItem)
                     {
                         missingSlot = true;
                         break;
                     }
 
-                    selectionItems.Add(looseItem ?? new CandidateItem(setSlot.ItemId, false));
-
                     if (storedInOutfit)
                     {
+                        selectionItems.Add(new CandidateItem(setSlot.ItemId, false));
                         storedSlotIndexes.Add(setSlot.SlotIndex);
                         storedSetItemIds.Add(setSlot.ItemId);
+                        continue;
                     }
 
-                    if (hasLooseItem && !storedInOutfit)
+                    if (hasLooseItem)
                     {
+                        selectionItems.Add(looseItem!);
                         restoreItems.Add(looseItem!);
+                        continue;
                     }
+
+                    selectionItems.Add(inventoryItem!);
+                    inventoryItemIds.Add(setSlot.ItemId);
                 }
 
                 if (missingSlot)
@@ -1470,12 +1478,12 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
 
                 if (hasStoredOutfit)
                 {
-                    if (storedSlotIndexes.Count == 0 || restoreItems.Count == 0)
+                    if (storedSlotIndexes.Count == 0 || restoreItems.Count + inventoryItemIds.Count == 0)
                     {
                         continue;
                     }
                 }
-                else if (restoreItems.Count != setSlots.Length)
+                else if (restoreItems.Count + inventoryItemIds.Count != setSlots.Length)
                 {
                     continue;
                 }
@@ -1486,6 +1494,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
                     setItemIds,
                     selectionItems,
                     restoreItems,
+                    inventoryItemIds.ToArray(),
                     storedSlotIndexes.ToArray(),
                     storedSetItemIds.ToArray(),
                     selectionItems.Any(item => item.Dyed) || hasStoredOutfit));
@@ -1499,6 +1508,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
             .ThenBy(candidate => candidate.SetItemId))
         {
             var candidateReservedItems = candidate.RestoreItems.Select(item => item.ItemId).ToList();
+            candidateReservedItems.AddRange(candidate.InventoryItemIds);
             if (candidate.IsMerge)
             {
                 candidateReservedItems.Add(candidate.SetItemId);
@@ -1541,6 +1551,46 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
         var dyed = manager->PrismBoxStain0Ids[index] != 0 || manager->PrismBoxStain1Ids[index] != 0;
         item = new CandidateItem(itemId, dyed);
         return true;
+    }
+
+    private Dictionary<uint, CandidateItem> GetInventoryCandidateItems()
+    {
+        var items = new Dictionary<uint, CandidateItem>();
+        var inventoryManager = InventoryManager.Instance();
+        if (inventoryManager == null)
+        {
+            return items;
+        }
+
+        for (var inventoryTypeValue = (int)InventoryType.Inventory1; inventoryTypeValue <= (int)InventoryType.Inventory4; inventoryTypeValue++)
+        {
+            var inventoryType = (InventoryType)inventoryTypeValue;
+            var container = inventoryManager->GetInventoryContainer(inventoryType);
+            if (container == null)
+            {
+                continue;
+            }
+
+            for (var slotIndex = 0; slotIndex < container->GetSize(); slotIndex++)
+            {
+                var inventorySlot = container->GetInventorySlot(slotIndex);
+                if (inventorySlot == null)
+                {
+                    continue;
+                }
+
+                var itemId = inventorySlot->GetItemId();
+                if (itemId == 0 || items.ContainsKey(itemId))
+                {
+                    continue;
+                }
+
+                var dyed = inventorySlot->GetStain(0) != 0 || inventorySlot->GetStain(1) != 0;
+                items.Add(itemId, new CandidateItem(itemId, dyed));
+            }
+        }
+
+        return items;
     }
 
     private SetItemSlot[] GetSetItems(MirageStoreSetItem setRow)
@@ -1975,6 +2025,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
             uint[] setItemIds,
             List<CandidateItem> selectionItems,
             List<CandidateItem> restoreItems,
+            uint[] inventoryItemIds,
             int[] storedSlotIndexes,
             uint[] storedSetItemIds,
             bool requiresConfirmation)
@@ -1984,6 +2035,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
             this.SetItemIds = setItemIds;
             this.SelectionItems = selectionItems;
             this.RestoreItems = restoreItems;
+            this.InventoryItemIds = inventoryItemIds;
             this.StoredSlotIndexes = storedSlotIndexes;
             this.StoredSetItemIds = storedSetItemIds;
             this.RequiresConfirmation = requiresConfirmation;
@@ -1994,6 +2046,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
         public uint[] SetItemIds { get; }
         public List<CandidateItem> SelectionItems { get; }
         public List<CandidateItem> RestoreItems { get; }
+        public uint[] InventoryItemIds { get; }
         public int[] StoredSlotIndexes { get; }
         public uint[] StoredSetItemIds { get; }
         public bool RequiresConfirmation { get; }
@@ -2010,6 +2063,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
             this.SetItemIds = candidate.SetItemIds;
             this.SelectionItems = candidate.SelectionItems;
             this.RestoreItems = candidate.RestoreItems;
+            this.InventoryItemIds = candidate.InventoryItemIds;
             this.StoredSlotIndexes = candidate.StoredSlotIndexes;
             this.StoredSetItemIds = candidate.StoredSetItemIds;
             this.RequiresConfirmation = candidate.RequiresConfirmation;
@@ -2021,6 +2075,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
         public uint[] SetItemIds { get; }
         public List<CandidateItem> SelectionItems { get; }
         public List<CandidateItem> RestoreItems { get; }
+        public uint[] InventoryItemIds { get; }
         public int[] StoredSlotIndexes { get; }
         public uint[] StoredSetItemIds { get; }
         public bool RequiresConfirmation { get; }
