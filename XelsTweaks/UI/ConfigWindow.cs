@@ -19,6 +19,7 @@ internal sealed class ConfigWindow : Window, IDisposable
     private const float ContentPadding = 16f;
     private const float TweakRowMinHeight = 24f;
     private const float CheckboxColumnWidth = 26f;
+    private const float CheckboxTextAlignmentOffset = 2f;
     private const float TweakConfigIndent = 18f;
     private const float HomeLogoSize = 192f;
     private const int SearchBufferSize = 128;
@@ -169,7 +170,7 @@ internal sealed class ConfigWindow : Window, IDisposable
             ImGui.TableNextRow(ImGuiTableRowFlags.None, rowHeight);
             ImGui.TableSetColumnIndex(0);
 
-            var checkboxOffset = MathF.Max(0f, (rowHeight - ImGui.GetFrameHeight()) * 0.5f);
+            var checkboxOffset = MathF.Max(0f, ((rowHeight - ImGui.GetFrameHeight()) * 0.5f) + CheckboxTextAlignmentOffset);
             ImGui.SetCursorPosY(ImGui.GetCursorPosY() + checkboxOffset);
             var enabled = tweak.IsEnabled;
             var requirementMet = tweak.IsRequirementMet;
@@ -253,7 +254,7 @@ internal sealed class ConfigWindow : Window, IDisposable
         this.DrawCenteredLogo(HomeLogoSize);
         ImGui.Spacing();
         DrawCenteredText("XelsTweaks", AccentColor);
-        DrawCenteredText("A modular collection of small quality-of-life tweaks.", DisabledColor);
+        DrawCenteredText("For when staring at frustrations angrily doesn't resolve them!", DisabledColor);
         ImGui.Spacing();
         DrawCenteredText($"{enabledTweaks} enabled / {totalTweaks} total", MutedAccentColor);
     }
@@ -284,7 +285,7 @@ internal sealed class ConfigWindow : Window, IDisposable
         if (tweak.LastError != null)
         {
             ImGui.Spacing();
-            ImGui.TextColored(ErrorColor, $"Last error: {tweak.LastError}");
+            ImGui.TextColored(ErrorColor, $"Needs attention: {tweak.LastError}");
         }
 
         if (tweak.IsEnabled || tweak.DrawConfigWhenDisabled)
@@ -329,13 +330,13 @@ internal sealed class ConfigWindow : Window, IDisposable
             }
         }
 
-        ImGui.TextDisabled($"{tweak.Id} - {FormatCategoryName(tweak.Category)}");
+        ImGui.TextDisabled(FormatCategoryName(tweak.Category));
         ImGui.Separator();
     }
 
     private void DrawEmptySearchState()
     {
-        ImGui.TextColored(WarningColor, "No tweaks match the current search.");
+        ImGui.TextColored(WarningColor, "No matching tweaks.");
     }
 
     private static void DrawCenteredText(string text, Vector4 color)
@@ -351,15 +352,15 @@ internal sealed class ConfigWindow : Window, IDisposable
     {
         if (!tweak.IsRequirementMet && tweak.Requirement is { } requirement)
         {
-            return $"Required: {requirement.PluginName}";
+            return $"Needs {requirement.PluginName}";
         }
 
         if (tweak.LastError != null)
         {
-            return "Error";
+            return "Needs attention";
         }
 
-        return tweak.IsEnabled ? "Enabled" : "Disabled";
+        return tweak.IsEnabled ? "On" : "Off";
     }
 
     private static Vector4 GetStatusColor(TweakBase tweak)

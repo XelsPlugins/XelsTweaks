@@ -150,12 +150,12 @@ public sealed class Plugin : IDalamudPlugin
 
         if (enabled && !tweak.IsRequirementMet && tweak.Requirement is { } requirement)
         {
-            this.Print($"{tweak.Name} requires {requirement.PluginName}.");
+            this.Print($"{tweak.Name} needs {requirement.PluginName}.");
             return;
         }
 
         this.tweakManager.SetEnabled(tweak, enabled);
-        this.Print($"{tweak.Name} is {(tweak.IsEnabled ? "enabled" : "disabled")}.");
+        this.Print($"{tweak.Name} is {(tweak.IsEnabled ? "on" : "off")}.");
     }
 
     private void ToggleTweakFromCommand(string[] args)
@@ -166,7 +166,7 @@ public sealed class Plugin : IDalamudPlugin
         }
 
         this.tweakManager.SetEnabled(tweak, !tweak.IsEnabled);
-        this.Print($"{tweak.Name} is {(tweak.IsEnabled ? "enabled" : "disabled")}.");
+        this.Print($"{tweak.Name} is {(tweak.IsEnabled ? "on" : "off")}.");
     }
 
     private bool TryGetCommandTweak(string[] args, out TweakBase tweak)
@@ -174,7 +174,7 @@ public sealed class Plugin : IDalamudPlugin
         tweak = null!;
         if (args.Length < 2)
         {
-            this.Print("Missing tweak ID. Use /xelstweaks list or /xt list.");
+            this.Print("Choose a tweak ID from /xelstweaks list or /xt list.");
             return false;
         }
 

@@ -51,7 +51,7 @@ internal sealed unsafe class AutoLoginTweak : TweakBase
 
     public override string Id => TweakId;
     public override string Name => "Auto Login";
-    public override string Description => "Uses Lifestream to log in a selected character from startup or character select. Requires Lifestream.";
+    public override string Description => "Logs in the selected character through Lifestream when the game starts or from character select.";
     public override TweakCategory Category => TweakCategory.Utility;
     public override bool DrawConfigWhenDisabled => true;
     public override TweakRequirement Requirement => LifestreamRequirement;
@@ -60,7 +60,7 @@ internal sealed unsafe class AutoLoginTweak : TweakBase
     {
         this.TryRefreshCharacterCacheFromLobby();
 
-        ImGui.TextWrapped("Requires Lifestream. XelsTweaks only asks Lifestream to log in the selected character; it does not click login dialogs directly.");
+        ImGui.TextWrapped("Uses Lifestream to handle the selected character login. Login windows are not clicked directly.");
 
         var changed = false;
         var characters = this.GetCachedCharacters();
@@ -74,7 +74,7 @@ internal sealed unsafe class AutoLoginTweak : TweakBase
         {
             if (characters.Count == 0)
             {
-                ImGui.TextDisabled("Open character select to populate this list.");
+                ImGui.TextDisabled("Open character select to load your characters.");
             }
 
             foreach (var character in characters)
@@ -82,7 +82,7 @@ internal sealed unsafe class AutoLoginTweak : TweakBase
                 var isSelected = selectedCharacter?.Matches(character) == true;
                 var label = character.CanLoginNormally
                     ? character.DisplayName
-                    : $"{character.DisplayName} (unavailable)";
+                    : $"{character.DisplayName} (cannot log in)";
 
                 if (ImGui.Selectable(label, isSelected) && character.CanLoginNormally)
                 {
@@ -102,16 +102,16 @@ internal sealed unsafe class AutoLoginTweak : TweakBase
 
         if (selectedCharacter == null)
         {
-            ImGui.TextColored(new Vector4(1f, 0.74f, 0.25f, 1f), "No character selected. Auto Login will stay idle.");
+            ImGui.TextColored(new Vector4(1f, 0.74f, 0.25f, 1f), "Choose a character to use automatic login.");
         }
 
-        var status = this.GetString(LastStatusKey, "Idle.");
+        var status = this.GetString(LastStatusKey, "Ready.");
         ImGui.TextWrapped($"Status: {status}");
 
         var error = this.GetString(LastErrorKey, string.Empty);
         if (!string.IsNullOrWhiteSpace(error))
         {
-            ImGui.TextColored(new Vector4(1f, 0.35f, 0.35f, 1f), $"Last error: {error}");
+            ImGui.TextColored(new Vector4(1f, 0.35f, 0.35f, 1f), $"Problem: {error}");
         }
 
         return changed;
@@ -130,20 +130,20 @@ internal sealed unsafe class AutoLoginTweak : TweakBase
         if (this.disarmedForSession)
         {
             var status = this.Services.ClientState.IsLoggedIn
-                ? "Already logged in; Auto Login is disarmed for this game session."
-                : "Auto Login already ran this game session.";
+                ? "Already logged in; automatic login will not run again this session."
+                : "Automatic login already ran this game session.";
             this.SetStatus(status);
             return;
         }
 
-        this.SetStatus("Waiting for Lifestream and character select data.");
+        this.SetStatus("Waiting for Lifestream and character select.");
     }
 
     protected override void OnDisable()
     {
         this.Services.ClientState.Login -= this.OnLogin;
         this.Services.Framework.Update -= this.OnFrameworkUpdate;
-        this.SetStatus("Disabled.");
+        this.SetStatus("Off.");
     }
 
     private void OnFrameworkUpdate(IFramework framework)
@@ -152,7 +152,7 @@ internal sealed unsafe class AutoLoginTweak : TweakBase
 
         if (this.Services.ClientState.IsLoggedIn)
         {
-            this.DisarmForSession("Logged in; Auto Login is disarmed for this game session.");
+            this.DisarmForSession("Logged in; automatic login will not run again this session.");
             return;
         }
 
@@ -164,7 +164,7 @@ internal sealed unsafe class AutoLoginTweak : TweakBase
         var selectedCharacter = this.GetSelectedCharacter();
         if (selectedCharacter == null)
         {
-            this.SetStatus("No character selected. Auto Login is idle.");
+            this.SetStatus("Choose a character to use automatic login.");
             return;
         }
 
@@ -180,7 +180,7 @@ internal sealed unsafe class AutoLoginTweak : TweakBase
 
     private void OnLogin()
     {
-        this.DisarmForSession("Logged in; Auto Login is disarmed for this game session.");
+        this.DisarmForSession("Logged in; automatic login will not run again this session.");
     }
 
     private void TryStartLogin(CachedCharacter selectedCharacter, DateTimeOffset now)
@@ -195,14 +195,14 @@ internal sealed unsafe class AutoLoginTweak : TweakBase
         this.SetLastError(null);
         if (now - this.lifestreamAvailableAt > StartupTimeout)
         {
-            this.DisarmForSession("Auto Login timed out after Lifestream became available.");
+            this.DisarmForSession("Lifestream did not accept the login request in time.");
             this.SetLastError("Timed out before Lifestream accepted the login request.");
             return;
         }
 
         if (!canAutoLogin)
         {
-            this.SetStatus("Waiting for Lifestream auto-login support.");
+            this.SetStatus("Waiting for Lifestream to allow automatic login.");
             return;
         }
 
@@ -214,7 +214,7 @@ internal sealed unsafe class AutoLoginTweak : TweakBase
 
         if (isBusy)
         {
-            this.SetStatus("Waiting for Lifestream to become idle.");
+            this.SetStatus("Waiting for Lifestream to finish its current action.");
             return;
         }
 
@@ -230,12 +230,12 @@ internal sealed unsafe class AutoLoginTweak : TweakBase
 
         if (!invoked)
         {
-            this.SetWaitingError(error ?? "Lifestream did not accept the login request yet.");
+            this.SetWaitingError(error ?? "Lifestream has not accepted the login request yet.");
             return;
         }
 
         this.SetLastError(null);
-        this.DisarmForSession($"Login request handed to Lifestream for {selectedCharacter.DisplayName}.");
+        this.DisarmForSession($"Asked Lifestream to log in {selectedCharacter.DisplayName}.");
     }
 
     private void TryRefreshCharacterCacheFromLobby()
@@ -296,7 +296,7 @@ internal sealed unsafe class AutoLoginTweak : TweakBase
         if (this.GetString(CachedCharactersJsonKey, string.Empty) != json)
         {
             this.SetString(CachedCharactersJsonKey, json);
-            this.SetStatus($"Cached {characters.Count} character{(characters.Count == 1 ? string.Empty : "s")} from character select.");
+            this.SetStatus($"Loaded {characters.Count} character{(characters.Count == 1 ? string.Empty : "s")} from character select.");
         }
     }
 

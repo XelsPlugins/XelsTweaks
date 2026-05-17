@@ -25,8 +25,8 @@ internal sealed class PartyListExamineTweak : TweakBase
     }
 
     public override string Id => TweakId;
-    public override string Name => "Party List Examine";
-    public override string Description => "Adds Examine to player context menus opened from the Party List.";
+    public override string Name => "Examine Party Members";
+    public override string Description => "Adds Examine to right-click menus for party members.";
     public override TweakCategory Category => TweakCategory.Interface;
 
     protected override void OnEnable()
