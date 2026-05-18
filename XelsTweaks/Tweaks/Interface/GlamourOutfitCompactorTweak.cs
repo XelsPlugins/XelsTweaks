@@ -172,10 +172,19 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
         }
 
         ImGui.TextColored(WarningColor, "Important:");
-        ImGui.SameLine();
-        ImGui.TextWrapped("Cleanup only runs after you press the overlay button. Loose matching pieces may be moved into new or existing outfit glamours. Creating new outfits from inventory can use more Glamour Dresser slots. HQ pieces are ignored because their quality cannot be lowered while the Glamour Dresser is open. Dyed pieces can lose dye when stored, so leave Ask before adding dyed pieces on if you want to review those first. Duplicate dresser items are only matched when both dyes are the same.");
+        DrawImportantBullet("New outfits created from inventory can use extra Glamour Dresser slots.");
+        DrawImportantBullet("HQ pieces are skipped.");
+        DrawImportantBullet("Dyed pieces can lose dye when stored. Keep Ask before adding dyed pieces enabled if you want to review them first.");
+        DrawImportantBullet("Duplicate cleanup only treats same-dye copies as duplicates.");
 
         return changed;
+    }
+
+    private static void DrawImportantBullet(string text)
+    {
+        ImGui.Bullet();
+        ImGui.SameLine();
+        ImGui.TextWrapped(text);
     }
 
     protected override void OnEnable()
