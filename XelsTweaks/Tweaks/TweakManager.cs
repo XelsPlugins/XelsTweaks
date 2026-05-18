@@ -107,6 +107,11 @@ internal sealed class TweakManager : IDisposable
             this.config.GetOrCreateTweakState(GlamourOutfitCompactorTweak.TweakId),
             this.saveConfig));
 
+        this.Register(new ArmoireAutomationTweak(
+            this.services,
+            this.config.GetOrCreateTweakState(ArmoireAutomationTweak.TweakId),
+            this.saveConfig));
+
         this.Register(new PartyListExamineTweak(
             this.services,
             this.config.GetOrCreateTweakState(PartyListExamineTweak.TweakId),
