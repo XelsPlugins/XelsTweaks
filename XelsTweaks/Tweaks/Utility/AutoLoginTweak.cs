@@ -16,15 +16,11 @@ internal sealed unsafe class AutoLoginTweak : TweakBase
     private const string SelectedCharacterNameKey = "selectedCharacterName";
     private const string SelectedHomeWorldKey = "selectedHomeWorld";
     private const string SelectedContentIdKey = "selectedContentId";
+    private const string ServiceAccountIndexKey = "serviceAccountIndex";
     private const string CachedCharactersJsonKey = "cachedCharactersJson";
     private const string LastStatusKey = "lastStatus";
     private const string LastErrorKey = "lastError";
     private const string CharaSelectAddonName = "_CharaSelectListMenu";
-
-    private static readonly TweakRequirement LifestreamRequirement = new(
-        "Lifestream",
-        "Lifestream",
-        "https://github.com/NightmareXIV/Lifestream");
 
     private static readonly TimeSpan StartupDelay = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan RetryDelay = TimeSpan.FromSeconds(2);
@@ -35,7 +31,7 @@ internal sealed unsafe class AutoLoginTweak : TweakBase
 
     private static bool isDisarmedForProcess;
 
-    private readonly LifestreamIpc lifestreamIpc;
+    private readonly LobbyLoginService lobbyLoginService;
     private DateTimeOffset nextAttemptAt;
     private bool hasAttemptedThisSession;
     private bool disarmedForSession;
@@ -43,21 +39,20 @@ internal sealed unsafe class AutoLoginTweak : TweakBase
     public AutoLoginTweak(DalamudServices services, TweakState state, Action saveConfig)
         : base(services, state, saveConfig)
     {
-        this.lifestreamIpc = new LifestreamIpc(services.PluginInterface);
+        this.lobbyLoginService = new LobbyLoginService(services);
     }
 
     public override string Id => TweakId;
     public override string Name => "Auto Login";
-    public override string Description => "Logs in the selected character through Lifestream when the game starts or from character select.";
+    public override string Description => "Logs in the selected character from the title screen or character select.";
     public override TweakCategory Category => TweakCategory.Utility;
     public override bool DrawConfigWhenDisabled => true;
-    public override TweakRequirement Requirement => LifestreamRequirement;
 
     public override bool DrawConfig()
     {
         this.TryRefreshCharacterCacheFromLobby();
 
-        ImGui.TextWrapped("Uses Lifestream to handle the selected character login. Login windows are not clicked directly.");
+        ImGui.TextWrapped("Uses the game's title and character select screens directly.");
 
         var changed = false;
         var characters = this.GetCachedCharacters();
@@ -102,6 +97,29 @@ internal sealed unsafe class AutoLoginTweak : TweakBase
             ImGui.TextColored(new Vector4(1f, 0.74f, 0.25f, 1f), "Choose a character to use automatic login.");
         }
 
+        var serviceAccountIndex = this.GetServiceAccountIndex();
+        var serviceAccountLabel = $"Service account {serviceAccountIndex + 1}";
+        ImGui.SetNextItemWidth(180f);
+        if (ImGui.BeginCombo("Service account", serviceAccountLabel))
+        {
+            for (var i = 0; i < 8; i++)
+            {
+                var isSelected = i == serviceAccountIndex;
+                if (ImGui.Selectable($"Service account {i + 1}", isSelected))
+                {
+                    this.SetInt(ServiceAccountIndexKey, i);
+                    changed = true;
+                }
+
+                if (isSelected)
+                {
+                    ImGui.SetItemDefaultFocus();
+                }
+            }
+
+            ImGui.EndCombo();
+        }
+
         var status = this.GetString(LastStatusKey, "Ready.");
         ImGui.TextWrapped($"Status: {status}");
 
@@ -131,7 +149,7 @@ internal sealed unsafe class AutoLoginTweak : TweakBase
             return;
         }
 
-        this.SetStatus("Waiting for Lifestream and character select.");
+        this.SetStatus("Waiting for the title screen or character select.");
     }
 
     protected override void OnDisable()
@@ -180,55 +198,34 @@ internal sealed unsafe class AutoLoginTweak : TweakBase
 
     private void TryStartLogin(CachedCharacter selectedCharacter)
     {
-        if (!this.lifestreamIpc.TryCanAutoLogin(out var canAutoLogin, out var error))
+        if (!this.lobbyLoginService.TryStepLogin(
+                selectedCharacter.ContentId,
+                selectedCharacter.Name,
+                selectedCharacter.HomeWorld,
+                selectedCharacter.HomeWorldId,
+                this.GetServiceAccountIndex(),
+                out var completed,
+                out var status,
+                out var error))
         {
-            if (this.IsRequirementMet && !this.lifestreamIpc.CanAutoLoginAvailable)
-            {
-                this.SetWaitingStatus("Waiting for Lifestream to finish loading.");
-                return;
-            }
-
-            this.SetWaitingError(error);
+            this.SetWaitingError(error ?? "Automatic login could not run yet.");
             return;
         }
 
-        this.SetLastError(null);
-        if (!canAutoLogin)
-        {
-            this.SetStatus("Waiting for Lifestream to allow automatic login.");
-            return;
-        }
-
-        if (!this.lifestreamIpc.TryIsBusy(out var isBusy, out error))
+        if (!string.IsNullOrWhiteSpace(error))
         {
             this.SetWaitingError(error);
             return;
         }
 
-        if (isBusy)
-        {
-            this.SetStatus("Waiting for Lifestream to finish its current action.");
-            return;
-        }
-
-        var usedCharacterSelectLogin = this.lifestreamIpc.TryCanInitiateTravelFromCharaSelectList(out var canUseCharacterSelect, out error)
-            && canUseCharacterSelect;
-
-        bool accepted;
-        var invoked = usedCharacterSelectLogin
-            ? this.lifestreamIpc.TryInitiateLoginFromCharaSelectScreen(selectedCharacter.Name, selectedCharacter.HomeWorld, out accepted, out error)
-                && accepted
-            : this.lifestreamIpc.TryConnectAndLogin(selectedCharacter.Name, selectedCharacter.HomeWorld, out accepted, out error)
-                && accepted;
-
-        if (!invoked)
-        {
-            this.SetWaitingError(error ?? "Lifestream has not accepted the login request yet.");
-            return;
-        }
-
         this.SetLastError(null);
-        this.DisarmForSession($"Asked Lifestream to log in {selectedCharacter.DisplayName}.");
+        if (completed)
+        {
+            this.DisarmForSession(status);
+            return;
+        }
+
+        this.SetStatus(status);
     }
 
     private void TryRefreshCharacterCacheFromLobby()
@@ -342,6 +339,11 @@ internal sealed unsafe class AutoLoginTweak : TweakBase
         this.SetLastError(null);
     }
 
+    private int GetServiceAccountIndex()
+    {
+        return Math.Clamp(this.GetInt(ServiceAccountIndexKey, 0), 0, 7);
+    }
+
     private void DisarmForSession(string status)
     {
         isDisarmedForProcess = true;
@@ -354,7 +356,7 @@ internal sealed unsafe class AutoLoginTweak : TweakBase
     {
         if (string.IsNullOrWhiteSpace(error))
         {
-            this.SetWaitingStatus("Waiting for Lifestream to accept the login request.");
+            this.SetWaitingStatus("Waiting for the login request to be accepted.");
             return;
         }
 
