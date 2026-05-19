@@ -15,10 +15,11 @@ using FFXIVClientStructs.FFXIV.Client.UI;
 using FFXIVClientStructs.FFXIV.Client.UI.Agent;
 using FFXIVClientStructs.FFXIV.Component.GUI;
 using Lumina.Excel.Sheets;
+using XelsTweaks.Tweaks.MenuControl;
 
 namespace XelsTweaks.Tweaks.Interface;
 
-internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
+internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase, IControllableTweakMenu
 {
     public const string TweakId = "interface.glamourOutfitCompactor";
 
@@ -113,6 +114,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
     public override string Description => "Adds a Glamour Dresser button that moves loose matching pieces into outfit glamours.";
     public override TweakCategory Category => TweakCategory.Interface;
     public override bool DrawConfigWhenDisabled => true;
+    public string MenuId => this.Id;
 
     private bool ConfirmDyedOutfits => this.GetBool(ConfirmDyedOutfitsKey, true);
     private bool ShowOverlayOnlyWhenEligible => this.GetBool(ShowOverlayOnlyWhenEligibleKey, true);
@@ -122,6 +124,273 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
         (int)NewInventoryOutfitPolicy.Off,
         (int)NewInventoryOutfitPolicy.PartialAndFullSets);
     private bool IsQueueActive => this.step is not QueueStep.Idle and not QueueStep.Complete and not QueueStep.Error;
+
+    public TweakMenuSnapshot GetMenuSnapshot()
+    {
+        if (this.IsEnabled && this.IsDresserOpen() && !this.IsPlateOpen())
+        {
+            this.RefreshCandidatesIfNeeded();
+        }
+
+        return new TweakMenuSnapshot(
+            this.step.ToString(),
+            this.lastError ?? this.status,
+            this.IsDresserOpen() && !this.IsPlateOpen(),
+            this.IsQueueActive,
+            this.queuePaused,
+            this.completedOutfits + this.completedDuplicateItems,
+            this.totalQueuedOutfits + this.totalQueuedDuplicateItems,
+            this.skippedOutfits + this.skippedDuplicateItems,
+            this.currentOutfit?.Name ?? this.currentDuplicateItem?.Name,
+            this.lastError);
+    }
+
+    public IReadOnlyList<TweakMenuAction> GetMenuActions()
+    {
+        return
+        [
+            this.CreateAction(
+                "run",
+                "Run Cleanup",
+                "Starts the Glamour Outfit Cleanup workflow.",
+                "Glamour Dresser open, plate window closed, workflow idle, candidates available.",
+                this.CanRunCleanup),
+            this.CreateAction(
+                "pause",
+                "Pause",
+                "Pauses an active cleanup workflow.",
+                "Cleanup running and not already paused.",
+                this.CanPauseCleanup),
+            this.CreateAction(
+                "resume",
+                "Resume",
+                "Resumes a paused cleanup workflow.",
+                "Cleanup paused.",
+                this.CanResumeCleanup),
+            this.CreateAction(
+                "continue",
+                "Continue",
+                "Continues after dyed-piece confirmation.",
+                "Cleanup waiting for dyed-piece confirmation.",
+                this.CanContinueConfirmation),
+            this.CreateAction(
+                "skip",
+                "Skip Outfit",
+                "Skips the outfit currently waiting for dyed-piece confirmation.",
+                "Cleanup waiting for dyed-piece confirmation.",
+                this.CanSkipConfirmation),
+            this.CreateAction(
+                "cancel",
+                "Cancel",
+                "Cancels the active cleanup workflow.",
+                "Cleanup workflow active.",
+                this.CanCancelCleanup),
+            this.CreateAction(
+                "reset",
+                "Reset",
+                "Clears completed or failed cleanup state.",
+                "Cleanup complete or in error.",
+                this.CanResetCleanup),
+            new TweakMenuAction(
+                "status",
+                "Status",
+                "Returns the current Glamour Outfit Cleanup menu state.",
+                "Always available.",
+                true,
+                null)
+        ];
+    }
+
+    public TweakMenuResult ExecuteMenuAction(string action)
+    {
+        switch (action.ToLowerInvariant())
+        {
+            case "status":
+                return this.CreateResult(true, this.lastError ?? this.status);
+            case "run":
+                if (!this.CanRunCleanup(out var runReason, true))
+                {
+                    return this.CreateResult(false, runReason);
+                }
+
+                this.StartQueue();
+                return this.CreateResult(true, "Started Glamour Outfit Cleanup.");
+            case "pause":
+                if (!this.CanPauseCleanup(out var pauseReason))
+                {
+                    return this.CreateResult(false, pauseReason);
+                }
+
+                this.SetQueuePaused(true);
+                return this.CreateResult(true, "Paused Glamour Outfit Cleanup.");
+            case "resume":
+                if (!this.CanResumeCleanup(out var resumeReason))
+                {
+                    return this.CreateResult(false, resumeReason);
+                }
+
+                this.SetQueuePaused(false);
+                return this.CreateResult(true, "Resumed Glamour Outfit Cleanup.");
+            case "continue":
+                if (!this.CanContinueConfirmation(out var continueReason))
+                {
+                    return this.CreateResult(false, continueReason);
+                }
+
+                this.EnterStep(QueueStep.RestoringItems, $"Restoring pieces for {this.currentOutfit?.Name ?? "outfit"}.");
+                return this.CreateResult(true, "Continued Glamour Outfit Cleanup.");
+            case "skip":
+                if (!this.CanSkipConfirmation(out var skipReason))
+                {
+                    return this.CreateResult(false, skipReason);
+                }
+
+                this.SkipCurrentOutfit("Skipped outfit with dyed pieces.");
+                return this.CreateResult(true, "Skipped the current outfit.");
+            case "cancel":
+                if (!this.CanCancelCleanup(out var cancelReason))
+                {
+                    return this.CreateResult(false, cancelReason);
+                }
+
+                this.ResetQueue("Cancelled.");
+                return this.CreateResult(true, "Cancelled Glamour Outfit Cleanup.");
+            case "reset":
+                if (!this.CanResetCleanup(out var resetReason))
+                {
+                    return this.CreateResult(false, resetReason);
+                }
+
+                this.ResetQueue("Ready.");
+                this.MarkCandidatesDirty();
+                return this.CreateResult(true, "Reset Glamour Outfit Cleanup.");
+            default:
+                return this.CreateResult(false, $"Unknown action for {this.Id}: {action}");
+        }
+    }
+
+    private TweakMenuAction CreateAction(
+        string id,
+        string label,
+        string description,
+        string requires,
+        TryGetDisabledReason availability)
+    {
+        var available = availability(out var disabledReason);
+        return new TweakMenuAction(id, label, description, requires, available, available ? null : disabledReason);
+    }
+
+    private TweakMenuResult CreateResult(bool success, string message)
+    {
+        return new TweakMenuResult(success, message, this.GetMenuSnapshot());
+    }
+
+    private bool CanRunCleanup(out string disabledReason)
+    {
+        return this.CanRunCleanup(out disabledReason, false);
+    }
+
+    private bool CanRunCleanup(out string disabledReason, bool forceCandidateRefresh)
+    {
+        disabledReason = string.Empty;
+        if (!this.IsEnabled)
+        {
+            disabledReason = "Glamour Outfit Cleanup is disabled.";
+            return false;
+        }
+
+        if (!this.IsDresserOpen() || this.IsPlateOpen())
+        {
+            disabledReason = "Open the Glamour Dresser without a plate window first.";
+            return false;
+        }
+
+        if (this.step != QueueStep.Idle)
+        {
+            disabledReason = "Glamour Outfit Cleanup is not idle.";
+            return false;
+        }
+
+        this.RefreshCandidatesIfNeeded(forceCandidateRefresh);
+        if (this.candidates.Count == 0 && this.duplicateCandidates.Count == 0)
+        {
+            disabledReason = "No Glamour Dresser cleanup candidates were found.";
+            return false;
+        }
+
+        return true;
+    }
+
+    private bool CanPauseCleanup(out string disabledReason)
+    {
+        disabledReason = string.Empty;
+        if (!this.IsQueueActive || this.step == QueueStep.WaitingForDyedConfirmation)
+        {
+            disabledReason = "No pausable cleanup workflow is active.";
+            return false;
+        }
+
+        if (this.queuePaused)
+        {
+            disabledReason = "Glamour Outfit Cleanup is already paused.";
+            return false;
+        }
+
+        return true;
+    }
+
+    private bool CanResumeCleanup(out string disabledReason)
+    {
+        disabledReason = string.Empty;
+        if (!this.IsQueueActive || !this.queuePaused)
+        {
+            disabledReason = "Glamour Outfit Cleanup is not paused.";
+            return false;
+        }
+
+        return true;
+    }
+
+    private bool CanContinueConfirmation(out string disabledReason)
+    {
+        disabledReason = string.Empty;
+        if (this.step != QueueStep.WaitingForDyedConfirmation)
+        {
+            disabledReason = "Glamour Outfit Cleanup is not waiting for dyed-piece confirmation.";
+            return false;
+        }
+
+        return true;
+    }
+
+    private bool CanSkipConfirmation(out string disabledReason)
+    {
+        return this.CanContinueConfirmation(out disabledReason);
+    }
+
+    private bool CanCancelCleanup(out string disabledReason)
+    {
+        disabledReason = string.Empty;
+        if (!this.IsQueueActive)
+        {
+            disabledReason = "No Glamour Outfit Cleanup workflow is active.";
+            return false;
+        }
+
+        return true;
+    }
+
+    private bool CanResetCleanup(out string disabledReason)
+    {
+        disabledReason = string.Empty;
+        if (this.step is not QueueStep.Complete and not QueueStep.Error)
+        {
+            disabledReason = "Glamour Outfit Cleanup is not complete or in error.";
+            return false;
+        }
+
+        return true;
+    }
 
     public override bool DrawConfig()
     {
@@ -441,12 +710,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
             default:
                 if (ImGui.Button(this.queuePaused ? "Resume" : "Pause"))
                 {
-                    this.queuePaused = !this.queuePaused;
-                    this.status = this.queuePaused
-                        ? "Paused."
-                        : $"Resuming {this.currentOutfit?.Name ?? this.currentDuplicateItem?.Name ?? "cleanup"}.";
-                    this.nextActionAt = DateTimeOffset.UtcNow + ActionDelay;
-                    this.stepStartedAt = DateTimeOffset.UtcNow;
+                    this.SetQueuePaused(!this.queuePaused);
                 }
 
                 ImGui.SameLine();
@@ -2356,6 +2620,16 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
         this.BeginNextOutfit();
     }
 
+    private void SetQueuePaused(bool paused)
+    {
+        this.queuePaused = paused;
+        this.status = this.queuePaused
+            ? "Paused."
+            : $"Resuming {this.currentOutfit?.Name ?? this.currentDuplicateItem?.Name ?? "cleanup"}.";
+        this.nextActionAt = DateTimeOffset.UtcNow + ActionDelay;
+        this.stepStartedAt = DateTimeOffset.UtcNow;
+    }
+
     private void ResetQueue(string message)
     {
         this.queue.Clear();
@@ -3484,6 +3758,8 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase
     {
         Normal
     }
+
+    private delegate bool TryGetDisabledReason(out string disabledReason);
 
     private enum QueueStep
     {

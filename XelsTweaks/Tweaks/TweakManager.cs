@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using XelsTweaks.Tweaks.Interface;
+using XelsTweaks.Tweaks.MenuControl;
 using XelsTweaks.Tweaks.Utility;
 
 namespace XelsTweaks.Tweaks;
@@ -21,6 +22,7 @@ internal sealed class TweakManager : IDisposable
     }
 
     public IReadOnlyList<TweakBase> Tweaks => this.tweaks;
+    public IReadOnlyList<IControllableTweakMenu> ControllableMenus => this.tweaks.OfType<IControllableTweakMenu>().ToArray();
 
     public void Initialize()
     {
@@ -49,6 +51,13 @@ internal sealed class TweakManager : IDisposable
     public TweakBase? FindById(string id)
     {
         return this.tweaks.FirstOrDefault(tweak => tweak.Id.Equals(id, StringComparison.OrdinalIgnoreCase));
+    }
+
+    public IControllableTweakMenu? FindMenuById(string id)
+    {
+        return this.tweaks
+            .OfType<IControllableTweakMenu>()
+            .FirstOrDefault(menu => menu.MenuId.Equals(id, StringComparison.OrdinalIgnoreCase));
     }
 
     public bool SetEnabled(TweakBase tweak, bool enabled)

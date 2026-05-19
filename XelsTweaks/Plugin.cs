@@ -6,6 +6,7 @@ using Dalamud.Interface.Windowing;
 using Dalamud.IoC;
 using Dalamud.Plugin;
 using Dalamud.Plugin.Services;
+using XelsTweaks.Tweaks.MenuControl;
 
 namespace XelsTweaks;
 
@@ -37,8 +38,10 @@ public sealed class Plugin : IDalamudPlugin
     private readonly Configuration config;
     private readonly DalamudServices services;
     private readonly TweakManager tweakManager;
+    private readonly TweakMenuIpcService tweakMenuIpcService;
     private readonly WindowSystem windowSystem = new("XelsTweaks");
     private readonly ConfigWindow configWindow;
+    private readonly SndDocumentationWindow sndDocumentationWindow;
 
     public Plugin()
     {
@@ -68,20 +71,23 @@ public sealed class Plugin : IDalamudPlugin
 
         this.tweakManager = new TweakManager(this.config, this.services, this.SaveConfig);
         this.tweakManager.Initialize();
+        this.tweakMenuIpcService = new TweakMenuIpcService(this.services, this.tweakManager);
 
         this.configWindow = new ConfigWindow(
             this.tweakManager,
             TextureProvider,
             Path.Combine(PluginInterface.AssemblyLocation.DirectoryName ?? string.Empty, "logo.png"));
         this.windowSystem.AddWindow(this.configWindow);
+        this.sndDocumentationWindow = new SndDocumentationWindow(this.tweakManager);
+        this.windowSystem.AddWindow(this.sndDocumentationWindow);
 
         CommandManager.AddHandler(CommandName, new CommandInfo(this.OnCommand)
         {
-            HelpMessage = "Open XelsTweaks. Usage: /xelstweaks or /xt [list|on <id>|off <id>|toggle <id>]"
+            HelpMessage = "Open XelsTweaks. Usage: /xelstweaks or /xt [list|on <id>|off <id>|toggle <id>|menu|snd|docs snd]"
         });
         CommandManager.AddHandler(ShortCommandName, new CommandInfo(this.OnCommand)
         {
-            HelpMessage = "Open XelsTweaks. Usage: /xt or /xelstweaks [list|on <id>|off <id>|toggle <id>]"
+            HelpMessage = "Open XelsTweaks. Usage: /xt or /xelstweaks [list|on <id>|off <id>|toggle <id>|menu|snd|docs snd]"
         });
 
         PluginInterface.UiBuilder.Draw += this.windowSystem.Draw;
@@ -97,6 +103,8 @@ public sealed class Plugin : IDalamudPlugin
         CommandManager.RemoveHandler(CommandName);
         CommandManager.RemoveHandler(ShortCommandName);
         this.windowSystem.RemoveAllWindows();
+        this.tweakMenuIpcService.Dispose();
+        this.sndDocumentationWindow.Dispose();
         this.configWindow.Dispose();
         this.tweakManager.Dispose();
     }
@@ -126,8 +134,17 @@ public sealed class Plugin : IDalamudPlugin
             case "toggle":
                 this.ToggleTweakFromCommand(args);
                 break;
+            case "menu":
+                this.HandleMenuCommand(args);
+                break;
+            case "snd":
+                this.OpenSndDocumentation();
+                break;
+            case "docs" when args.Length > 1 && args[1].Equals("snd", StringComparison.OrdinalIgnoreCase):
+                this.OpenSndDocumentation();
+                break;
             default:
-                this.Print("Usage: /xelstweaks or /xt [list|on <id>|off <id>|toggle <id>]");
+                this.Print("Usage: /xelstweaks or /xt [list|on <id>|off <id>|toggle <id>|menu|snd|docs snd]");
                 break;
         }
     }
@@ -190,9 +207,97 @@ public sealed class Plugin : IDalamudPlugin
         return true;
     }
 
+    private void HandleMenuCommand(string[] args)
+    {
+        if (args.Length < 2 || args[1].Equals("list", StringComparison.OrdinalIgnoreCase))
+        {
+            this.PrintMenuList();
+            return;
+        }
+
+        if (args.Length < 3)
+        {
+            this.Print("Usage: /xt menu <tweakId> [status|actions|action]");
+            return;
+        }
+
+        var menuId = args[1];
+        var menu = this.tweakManager.FindMenuById(menuId);
+        if (menu == null)
+        {
+            this.Print($"Unknown controllable menu: {menuId}");
+            return;
+        }
+
+        var action = args[2];
+        if (action.Equals("status", StringComparison.OrdinalIgnoreCase))
+        {
+            this.PrintMenuStatus(menu);
+            return;
+        }
+
+        if (action.Equals("actions", StringComparison.OrdinalIgnoreCase))
+        {
+            this.PrintMenuActions(menu);
+            return;
+        }
+
+        var result = menu.ExecuteMenuAction(action);
+        this.Print(result.Message);
+    }
+
+    private void PrintMenuList()
+    {
+        var menus = this.tweakManager.ControllableMenus
+            .OrderBy(menu => ((TweakBase)menu).Name)
+            .ToArray();
+        if (menus.Length == 0)
+        {
+            this.Print("No controllable menus are registered.");
+            return;
+        }
+
+        foreach (var menu in menus)
+        {
+            var tweak = (TweakBase)menu;
+            this.Print($"{menu.MenuId} - {tweak.Name}");
+        }
+    }
+
+    private void PrintMenuStatus(IControllableTweakMenu menu)
+    {
+        var snapshot = menu.GetMenuSnapshot();
+        var progress = snapshot.Total > 0
+            ? $" Progress: {snapshot.Completed}/{snapshot.Total}."
+            : string.Empty;
+        var current = string.IsNullOrWhiteSpace(snapshot.CurrentItem)
+            ? string.Empty
+            : $" Current: {snapshot.CurrentItem}.";
+        var error = string.IsNullOrWhiteSpace(snapshot.Error)
+            ? string.Empty
+            : $" Error: {snapshot.Error}.";
+        this.Print($"{menu.MenuId}: {snapshot.State}. {snapshot.Status}{progress}{current}{error}");
+    }
+
+    private void PrintMenuActions(IControllableTweakMenu menu)
+    {
+        foreach (var action in menu.GetMenuActions())
+        {
+            var availability = action.Available
+                ? "available"
+                : $"unavailable: {action.DisabledReason}";
+            this.Print($"{menu.MenuId} {action.Id} - {availability} - {action.Description}");
+        }
+    }
+
     private void OpenConfig()
     {
         this.configWindow.IsOpen = true;
+    }
+
+    private void OpenSndDocumentation()
+    {
+        this.sndDocumentationWindow.IsOpen = true;
     }
 
     private void SaveConfig()
