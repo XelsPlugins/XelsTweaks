@@ -11,10 +11,11 @@ using FFXIVClientStructs.FFXIV.Client.UI.Agent;
 using FFXIVClientStructs.FFXIV.Component.GUI;
 using Lumina.Excel.Sheets;
 using CabinetSheet = Lumina.Excel.Sheets.Cabinet;
+using XelsTweaks.Tweaks.MenuControl;
 
 namespace XelsTweaks.Tweaks.Interface;
 
-internal sealed unsafe class ArmoireAutomationTweak : TweakBase
+internal sealed unsafe class ArmoireAutomationTweak : TweakBase, IControllableTweakMenu
 {
     public const string TweakId = "interface.armoireAutomation";
 
@@ -61,9 +62,186 @@ internal sealed unsafe class ArmoireAutomationTweak : TweakBase
     public override string Description => "Adds Armoire and Glamour Dresser buttons for moving Armoire-eligible items.";
     public override TweakCategory Category => TweakCategory.Interface;
     public override bool DrawConfigWhenDisabled => true;
+    public string MenuId => this.Id;
 
     private bool IsQueueActive => this.mode is QueueMode.StoringCabinet or QueueMode.WaitingForCabinetStore or QueueMode.RestoringDresser or QueueMode.WaitingForDresserRestore;
     private bool HideWhenNoWork => this.GetBool(HideWhenNoWorkKey, true);
+
+    public TweakMenuSnapshot GetMenuSnapshot()
+    {
+        return new TweakMenuSnapshot(
+            this.mode.ToString(),
+            this.status,
+            this.IsCabinetOpen() || (this.IsDresserOpen() && !this.IsPlateOpen()),
+            this.IsQueueActive,
+            false,
+            this.completed,
+            this.totalQueued,
+            this.skipped,
+            this.pendingCabinetStore?.Name ?? this.pendingDresserRestore?.Task.Name,
+            this.mode == QueueMode.Error ? this.status : null);
+    }
+
+    public IReadOnlyList<TweakMenuAction> GetMenuActions()
+    {
+        return
+        [
+            this.CreateAction(
+                "store-cabinet",
+                "Store Armoire Items",
+                "Starts storing listed Armoire-eligible items from the open Armoire window.",
+                "Armoire window open, candidates available, workflow idle.",
+                this.CanStartCabinetStore),
+            this.CreateAction(
+                "restore-dresser",
+                "Restore Dresser Items",
+                "Starts restoring Armoire-eligible items from the open Glamour Dresser.",
+                "Glamour Dresser open, plate window closed, inventory space and candidates available, workflow idle.",
+                this.CanStartDresserRestore),
+            this.CreateAction(
+                "cancel",
+                "Cancel",
+                "Cancels or clears the current Armoire Automation workflow state.",
+                "Workflow active, complete, or in error.",
+                this.CanCancelQueue),
+            new TweakMenuAction(
+                "status",
+                "Status",
+                "Returns the current Armoire Automation menu state.",
+                "Always available.",
+                true,
+                null)
+        ];
+    }
+
+    public TweakMenuResult ExecuteMenuAction(string action)
+    {
+        switch (action.ToLowerInvariant())
+        {
+            case "status":
+                return this.CreateResult(true, this.status);
+            case "store-cabinet":
+                if (!this.CanStartCabinetStore(out var storeReason))
+                {
+                    return this.CreateResult(false, storeReason);
+                }
+
+                this.StartCabinetStore();
+                return this.CreateResult(true, "Started storing Armoire items.");
+            case "restore-dresser":
+                if (!this.CanStartDresserRestore(out var restoreReason))
+                {
+                    return this.CreateResult(false, restoreReason);
+                }
+
+                this.StartDresserRestore();
+                return this.CreateResult(true, "Started restoring Armoire-eligible dresser items.");
+            case "cancel":
+                if (!this.CanCancelQueue(out var cancelReason))
+                {
+                    return this.CreateResult(false, cancelReason);
+                }
+
+                this.ResetQueue("Cancelled.");
+                return this.CreateResult(true, "Cancelled Armoire Automation.");
+            default:
+                return this.CreateResult(false, $"Unknown action for {this.Id}: {action}");
+        }
+    }
+
+    private TweakMenuAction CreateAction(
+        string id,
+        string label,
+        string description,
+        string requires,
+        TryGetDisabledReason availability)
+    {
+        var available = availability(out var disabledReason);
+        return new TweakMenuAction(id, label, description, requires, available, available ? null : disabledReason);
+    }
+
+    private TweakMenuResult CreateResult(bool success, string message)
+    {
+        return new TweakMenuResult(success, message, this.GetMenuSnapshot());
+    }
+
+    private bool CanStartCabinetStore(out string disabledReason)
+    {
+        disabledReason = string.Empty;
+        if (!this.IsEnabled)
+        {
+            disabledReason = "Armoire Automation is disabled.";
+            return false;
+        }
+
+        if (this.IsQueueActive)
+        {
+            disabledReason = "Armoire Automation is already busy.";
+            return false;
+        }
+
+        if (!this.IsCabinetOpen())
+        {
+            disabledReason = "Open the Armoire first.";
+            return false;
+        }
+
+        if (!this.TryGetNextCabinetStoreCandidate(out _))
+        {
+            disabledReason = "No storable Armoire items are listed.";
+            return false;
+        }
+
+        return true;
+    }
+
+    private bool CanStartDresserRestore(out string disabledReason)
+    {
+        disabledReason = string.Empty;
+        if (!this.IsEnabled)
+        {
+            disabledReason = "Armoire Automation is disabled.";
+            return false;
+        }
+
+        if (this.IsQueueActive)
+        {
+            disabledReason = "Armoire Automation is already busy.";
+            return false;
+        }
+
+        if (!this.IsDresserOpen() || this.IsPlateOpen())
+        {
+            disabledReason = "Open the Glamour Dresser without a plate window first.";
+            return false;
+        }
+
+        if (this.CountAvailableInventorySlots() <= 0)
+        {
+            disabledReason = "Inventory is full.";
+            return false;
+        }
+
+        if (!this.TryFindNextDresserRestoreTask(out _))
+        {
+            disabledReason = "No Armoire-eligible dresser items were found.";
+            return false;
+        }
+
+        return true;
+    }
+
+    private bool CanCancelQueue(out string disabledReason)
+    {
+        disabledReason = string.Empty;
+        if (this.mode == QueueMode.Idle)
+        {
+            disabledReason = "No Armoire Automation workflow is active.";
+            return false;
+        }
+
+        return true;
+    }
 
     public override bool DrawConfig()
     {
@@ -1056,6 +1234,8 @@ internal sealed unsafe class ArmoireAutomationTweak : TweakBase
     {
         return count == 1 ? string.Empty : "s";
     }
+
+    private delegate bool TryGetDisabledReason(out string disabledReason);
 
     private enum QueueMode
     {
