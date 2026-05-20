@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Game.Inventory;
@@ -27,6 +28,57 @@ internal sealed unsafe class TryOnCopyItemNameTweak : TweakBase
 
     private static readonly string[] TryOnAddonNames = ["Tryon", "FittingShop"];
     private static readonly SeString CopyItemNameLabel = "Copy Item Name";
+    private static readonly IReadOnlyList<TweakOptionDefinition> CommandOptions =
+    [
+        TweakOptionDefinition.Bool(
+            InventoryKey,
+            "Inventory",
+            "Shows Copy Item Name in regular inventory item menus.",
+            true,
+            "Item sources"),
+        TweakOptionDefinition.Bool(
+            ArmouryChestKey,
+            "Armoury Chest",
+            "Shows Copy Item Name in armoury chest item menus.",
+            true,
+            "Item sources"),
+        TweakOptionDefinition.Bool(
+            ChocoboSaddlebagKey,
+            "Chocobo Saddlebag",
+            "Shows Copy Item Name in chocobo saddlebag item menus.",
+            true,
+            "Item sources"),
+        TweakOptionDefinition.Bool(
+            FittingRoomKey,
+            "Fitting Room",
+            "Shows Copy Item Name in fitting room item menus.",
+            true,
+            "Item sources"),
+        TweakOptionDefinition.Bool(
+            RetainerInventoryKey,
+            "Retainer Inventory",
+            "Shows Copy Item Name in retainer inventory item menus.",
+            false,
+            "Item sources"),
+        TweakOptionDefinition.Bool(
+            FreeCompanyChestKey,
+            "Free Company Chest",
+            "Shows Copy Item Name in free company chest item menus.",
+            false,
+            "Item sources"),
+        TweakOptionDefinition.Bool(
+            HousingStorageKey,
+            "Housing Storage",
+            "Shows Copy Item Name in housing storage item menus.",
+            false,
+            "Item sources"),
+        TweakOptionDefinition.Bool(
+            OtherInventoryKey,
+            "Other item windows",
+            "Shows Copy Item Name in other supported item menus.",
+            false,
+            "Item sources")
+    ];
 
     private ulong? cachedHoverItemId;
 
@@ -40,6 +92,7 @@ internal sealed unsafe class TryOnCopyItemNameTweak : TweakBase
     public override string Description => "Adds Copy Item Name to supported item right-click menus.";
     public override TweakCategory Category => TweakCategory.Interface;
     public override bool DrawConfigWhenDisabled => true;
+    public override IReadOnlyList<TweakOptionDefinition> Options => CommandOptions;
 
     private bool EnableInventory => this.GetBool(InventoryKey, true);
     private bool EnableArmouryChest => this.GetBool(ArmouryChestKey, true);

@@ -41,7 +41,7 @@ public sealed class Plugin : IDalamudPlugin
     private readonly TweakMenuIpcService tweakMenuIpcService;
     private readonly WindowSystem windowSystem = new("XelsTweaks");
     private readonly ConfigWindow configWindow;
-    private readonly SndDocumentationWindow sndDocumentationWindow;
+    private readonly CommandReferenceWindow commandReferenceWindow;
 
     public Plugin()
     {
@@ -78,16 +78,16 @@ public sealed class Plugin : IDalamudPlugin
             TextureProvider,
             Path.Combine(PluginInterface.AssemblyLocation.DirectoryName ?? string.Empty, "logo.png"));
         this.windowSystem.AddWindow(this.configWindow);
-        this.sndDocumentationWindow = new SndDocumentationWindow(this.tweakManager);
-        this.windowSystem.AddWindow(this.sndDocumentationWindow);
+        this.commandReferenceWindow = new CommandReferenceWindow(this.tweakManager);
+        this.windowSystem.AddWindow(this.commandReferenceWindow);
 
         CommandManager.AddHandler(CommandName, new CommandInfo(this.OnCommand)
         {
-            HelpMessage = "Open XelsTweaks. Usage: /xelstweaks or /xt [list|on <id>|off <id>|toggle <id>|menu|snd|docs snd]"
+            HelpMessage = "Open XelsTweaks. Usage: /xelstweaks or /xt [list|on <id>|off <id>|toggle <id>|option <id> ...|menu|commands]"
         });
         CommandManager.AddHandler(ShortCommandName, new CommandInfo(this.OnCommand)
         {
-            HelpMessage = "Open XelsTweaks. Usage: /xt or /xelstweaks [list|on <id>|off <id>|toggle <id>|menu|snd|docs snd]"
+            HelpMessage = "Open XelsTweaks. Usage: /xt or /xelstweaks [list|on <id>|off <id>|toggle <id>|option <id> ...|menu|commands]"
         });
 
         PluginInterface.UiBuilder.Draw += this.windowSystem.Draw;
@@ -104,7 +104,7 @@ public sealed class Plugin : IDalamudPlugin
         CommandManager.RemoveHandler(ShortCommandName);
         this.windowSystem.RemoveAllWindows();
         this.tweakMenuIpcService.Dispose();
-        this.sndDocumentationWindow.Dispose();
+        this.commandReferenceWindow.Dispose();
         this.configWindow.Dispose();
         this.tweakManager.Dispose();
     }
@@ -134,17 +134,29 @@ public sealed class Plugin : IDalamudPlugin
             case "toggle":
                 this.ToggleTweakFromCommand(args);
                 break;
+            case "option":
+            case "options":
+            case "setting":
+            case "settings":
+                this.HandleOptionCommand(args);
+                break;
             case "menu":
                 this.HandleMenuCommand(args);
                 break;
-            case "snd":
-                this.OpenSndDocumentation();
+            case "commands":
+            case "command":
+            case "cmd":
+            case "reference":
+            case "ref":
+                this.OpenCommandReference();
                 break;
-            case "docs" when args.Length > 1 && args[1].Equals("snd", StringComparison.OrdinalIgnoreCase):
-                this.OpenSndDocumentation();
+            case "docs" when args.Length == 1:
+            case "docs" when args.Length > 1 && args[1].Equals("commands", StringComparison.OrdinalIgnoreCase):
+            case "docs" when args.Length > 1 && args[1].Equals("command", StringComparison.OrdinalIgnoreCase):
+                this.OpenCommandReference();
                 break;
             default:
-                this.Print("Usage: /xelstweaks or /xt [list|on <id>|off <id>|toggle <id>|menu|snd|docs snd]");
+                this.Print("Usage: /xelstweaks or /xt [list|on <id>|off <id>|toggle <id>|option <id> ...|menu|commands]");
                 break;
         }
     }
@@ -246,6 +258,119 @@ public sealed class Plugin : IDalamudPlugin
         this.Print(result.Message);
     }
 
+    private void HandleOptionCommand(string[] args)
+    {
+        if (args.Length < 2)
+        {
+            this.Print("Usage: /xt option <tweakId> [list|get <optionId>|set <optionId> <value>|toggle <optionId>]");
+            return;
+        }
+
+        var tweakId = args[1];
+        var tweak = this.tweakManager.FindById(tweakId);
+        if (tweak == null)
+        {
+            this.Print($"Unknown tweak ID: {tweakId}");
+            return;
+        }
+
+        if (args.Length < 3 || args[2].Equals("list", StringComparison.OrdinalIgnoreCase))
+        {
+            this.PrintOptionList(tweak);
+            return;
+        }
+
+        switch (args[2].ToLowerInvariant())
+        {
+            case "get":
+                this.GetOptionFromCommand(tweak, args);
+                break;
+            case "set":
+                this.SetOptionFromCommand(tweak, args);
+                break;
+            case "toggle":
+                this.ToggleOptionFromCommand(tweak, args);
+                break;
+            default:
+                this.Print("Usage: /xt option <tweakId> [list|get <optionId>|set <optionId> <value>|toggle <optionId>]");
+                break;
+        }
+    }
+
+    private void PrintOptionList(TweakBase tweak)
+    {
+        if (tweak.Options.Count == 0)
+        {
+            this.Print($"{tweak.Name} has no scriptable options.");
+            return;
+        }
+
+        foreach (var option in tweak.Options.OrderBy(option => option.Group).ThenBy(option => option.Label))
+        {
+            if (!tweak.TryGetOptionValue(option.Id, out var value))
+            {
+                continue;
+            }
+
+            var choices = option.Kind == TweakOptionKind.Choice
+                ? $" Values: {string.Join(", ", option.Choices.Select(choice => choice.Value))}."
+                : string.Empty;
+            this.Print($"{tweak.Id} {option.Id} = {value.Value} - {option.Label}.{choices}");
+        }
+    }
+
+    private void GetOptionFromCommand(TweakBase tweak, string[] args)
+    {
+        if (args.Length < 4)
+        {
+            this.Print("Usage: /xt option <tweakId> get <optionId>");
+            return;
+        }
+
+        if (!tweak.TryGetOptionValue(args[3], out var optionValue))
+        {
+            this.Print($"Unknown option for {tweak.Name}: {args[3]}");
+            return;
+        }
+
+        this.Print($"{tweak.Name}: {optionValue.Definition.Label} is {optionValue.Value}.");
+    }
+
+    private void SetOptionFromCommand(TweakBase tweak, string[] args)
+    {
+        if (args.Length < 5)
+        {
+            this.Print("Usage: /xt option <tweakId> set <optionId> <value>");
+            return;
+        }
+
+        var value = string.Join(' ', args.Skip(4));
+        if (!tweak.TrySetOptionValue(args[3], value, out var message))
+        {
+            this.Print(message);
+            return;
+        }
+
+        this.Print(message);
+    }
+
+    private void ToggleOptionFromCommand(TweakBase tweak, string[] args)
+    {
+        if (args.Length < 4)
+        {
+            this.Print("Usage: /xt option <tweakId> toggle <optionId>");
+            return;
+        }
+
+        if (!tweak.TryToggleOptionValue(args[3], out var message))
+        {
+            this.Print(message);
+            return;
+        }
+
+        this.Print(message);
+    }
+
     private void PrintMenuList()
     {
         var menus = this.tweakManager.ControllableMenus
@@ -295,9 +420,9 @@ public sealed class Plugin : IDalamudPlugin
         this.configWindow.IsOpen = true;
     }
 
-    private void OpenSndDocumentation()
+    private void OpenCommandReference()
     {
-        this.sndDocumentationWindow.IsOpen = true;
+        this.commandReferenceWindow.IsOpen = true;
     }
 
     private void SaveConfig()

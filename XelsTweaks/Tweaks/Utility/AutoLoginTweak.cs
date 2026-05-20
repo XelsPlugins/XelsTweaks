@@ -28,6 +28,25 @@ internal sealed unsafe class AutoLoginTweak : TweakBase
     {
         PropertyNameCaseInsensitive = true
     };
+    private static readonly IReadOnlyList<TweakOptionDefinition> CommandOptions =
+    [
+        TweakOptionDefinition.Choice(
+            ServiceAccountIndexKey,
+            "Service account",
+            "Selects which service account automatic login uses.",
+            "0",
+            [
+                new TweakOptionChoice("1", "Service account 1", "0"),
+                new TweakOptionChoice("2", "Service account 2", "1"),
+                new TweakOptionChoice("3", "Service account 3", "2"),
+                new TweakOptionChoice("4", "Service account 4", "3"),
+                new TweakOptionChoice("5", "Service account 5", "4"),
+                new TweakOptionChoice("6", "Service account 6", "5"),
+                new TweakOptionChoice("7", "Service account 7", "6"),
+                new TweakOptionChoice("8", "Service account 8", "7")
+            ],
+            "Login")
+    ];
 
     private static bool isDisarmedForProcess;
 
@@ -47,6 +66,7 @@ internal sealed unsafe class AutoLoginTweak : TweakBase
     public override string Description => "Logs in the selected character from the title screen or character select.";
     public override TweakCategory Category => TweakCategory.Utility;
     public override bool DrawConfigWhenDisabled => true;
+    public override IReadOnlyList<TweakOptionDefinition> Options => CommandOptions;
 
     public override bool DrawConfig()
     {

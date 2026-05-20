@@ -38,6 +38,15 @@ internal sealed unsafe class ArmoireAutomationTweak : TweakBase, IControllableTw
         InventoryType.Inventory3,
         InventoryType.Inventory4
     ];
+    private static readonly IReadOnlyList<TweakOptionDefinition> CommandOptions =
+    [
+        TweakOptionDefinition.Bool(
+            HideWhenNoWorkKey,
+            "Hide empty quick-action windows",
+            "Hides the quick-action windows when there is no Armoire work to do.",
+            true,
+            "Display")
+    ];
 
     private readonly HashSet<uint> skippedCabinetIds = [];
     private readonly HashSet<DresserSkipKey> skippedDresserTasks = [];
@@ -62,6 +71,7 @@ internal sealed unsafe class ArmoireAutomationTweak : TweakBase, IControllableTw
     public override string Description => "Adds Armoire and Glamour Dresser buttons for moving Armoire-eligible items.";
     public override TweakCategory Category => TweakCategory.Interface;
     public override bool DrawConfigWhenDisabled => true;
+    public override IReadOnlyList<TweakOptionDefinition> Options => CommandOptions;
     public string MenuId => this.Id;
 
     private bool IsQueueActive => this.mode is QueueMode.StoringCabinet or QueueMode.WaitingForCabinetStore or QueueMode.RestoringDresser or QueueMode.WaitingForDresserRestore;
