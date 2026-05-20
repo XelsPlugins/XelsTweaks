@@ -57,6 +57,7 @@ internal sealed unsafe class KeepHotbarsDuringNpcDialogueTweak : TweakBase
         new("SelectIconString", "Choice lists with icons", true),
         new("SelectOk", "OK prompts", true),
     ];
+    private static readonly IReadOnlyList<TweakOptionDefinition> CommandOptions = CreateCommandOptions();
 
     private readonly HashSet<string> actionAddonsVisibleBeforeDialogue = [];
     private DateTimeOffset suppressActionHideUntil = DateTimeOffset.MinValue;
@@ -74,6 +75,7 @@ internal sealed unsafe class KeepHotbarsDuringNpcDialogueTweak : TweakBase
     public override string Description => "Keeps selected action bars available while NPC dialogue is open.";
     public override TweakCategory Category => TweakCategory.Interface;
     public override bool DrawConfigWhenDisabled => true;
+    public override IReadOnlyList<TweakOptionDefinition> Options => CommandOptions;
 
     public override bool DrawConfig()
     {
@@ -438,6 +440,32 @@ internal sealed unsafe class KeepHotbarsDuringNpcDialogueTweak : TweakBase
     private static string GetSettingKey(string settingPrefix, string addonName)
     {
         return $"{settingPrefix}.{addonName}";
+    }
+
+    private static IReadOnlyList<TweakOptionDefinition> CreateCommandOptions()
+    {
+        var options = new List<TweakOptionDefinition>();
+        foreach (var option in ActionAddonOptions)
+        {
+            options.Add(TweakOptionDefinition.Bool(
+                GetSettingKey(ActionSettingPrefix, option.AddonName),
+                option.Label,
+                $"Keeps {option.Label} visible while dialogue is active.",
+                option.DefaultEnabled,
+                "Controls"));
+        }
+
+        foreach (var option in DialogueAddonOptions)
+        {
+            options.Add(TweakOptionDefinition.Bool(
+                GetSettingKey(DialogueSettingPrefix, option.AddonName),
+                option.Label,
+                $"Treats {option.Label} as dialogue for hotbar visibility.",
+                option.DefaultEnabled,
+                "Dialogue windows"));
+        }
+
+        return options;
     }
 
     private readonly record struct AddonOption(string AddonName, string Label, bool DefaultEnabled);

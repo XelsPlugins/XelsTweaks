@@ -70,6 +70,47 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase, IControlla
         InventoryType.Inventory3,
         InventoryType.Inventory4
     ];
+    private static readonly IReadOnlyList<TweakOptionDefinition> CommandOptions =
+    [
+        TweakOptionDefinition.Bool(
+            ConfirmDyedOutfitsKey,
+            "Ask before adding dyed pieces",
+            "Stops for confirmation before storing dyed pieces that could lose dye.",
+            true,
+            "Behavior"),
+        TweakOptionDefinition.Bool(
+            RestoreDuplicateItemsKey,
+            "Restore duplicate dresser items",
+            "Restores same-dye duplicate dresser items during cleanup.",
+            false,
+            "Behavior"),
+        TweakOptionDefinition.Choice(
+            NewInventoryOutfitPolicyKey,
+            "New outfits from inventory",
+            "Controls whether eligible inventory pieces can create new outfit glamours.",
+            ((int)NewInventoryOutfitPolicy.Off).ToString(System.Globalization.CultureInfo.InvariantCulture),
+            [
+                new TweakOptionChoice(
+                    "off",
+                    "Off",
+                    ((int)NewInventoryOutfitPolicy.Off).ToString(System.Globalization.CultureInfo.InvariantCulture)),
+                new TweakOptionChoice(
+                    "full-sets-only",
+                    "Full sets only",
+                    ((int)NewInventoryOutfitPolicy.FullSetsOnly).ToString(System.Globalization.CultureInfo.InvariantCulture)),
+                new TweakOptionChoice(
+                    "partial-and-full-sets",
+                    "Partial and full sets",
+                    ((int)NewInventoryOutfitPolicy.PartialAndFullSets).ToString(System.Globalization.CultureInfo.InvariantCulture))
+            ],
+            "Behavior"),
+        TweakOptionDefinition.Bool(
+            ShowOverlayOnlyWhenEligibleKey,
+            "Hide overlay when no outfits need updates",
+            "Hides the dresser overlay while no outfit cleanup candidates are available.",
+            true,
+            "Display")
+    ];
 
     private readonly List<OutfitCandidate> candidates = [];
     private readonly List<DuplicateItemCandidate> duplicateCandidates = [];
@@ -114,6 +155,7 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase, IControlla
     public override string Description => "Adds a Glamour Dresser button that moves loose matching pieces into outfit glamours.";
     public override TweakCategory Category => TweakCategory.Interface;
     public override bool DrawConfigWhenDisabled => true;
+    public override IReadOnlyList<TweakOptionDefinition> Options => CommandOptions;
     public string MenuId => this.Id;
 
     private bool ConfirmDyedOutfits => this.GetBool(ConfirmDyedOutfitsKey, true);
@@ -484,6 +526,15 @@ internal sealed unsafe class GlamourOutfitCompactorTweak : TweakBase, IControlla
         this.lastPrismBoxItemIds = [];
         this.openSetConvertAddress = nint.Zero;
         this.useCurrentSetConvertOpenSignature = false;
+    }
+
+    protected override void OnOptionChanged(TweakOptionDefinition option)
+    {
+        if (option.Id.Equals(RestoreDuplicateItemsKey, StringComparison.Ordinal)
+            || option.Id.Equals(NewInventoryOutfitPolicyKey, StringComparison.Ordinal))
+        {
+            this.MarkCandidatesDirty();
+        }
     }
 
     private void OnDresserAddonChanged(AddonEvent eventType, AddonArgs args)
