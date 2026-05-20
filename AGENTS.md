@@ -20,17 +20,15 @@ On Linux, set `DALAMUD_HOME` to a directory containing Dalamud dev assemblies. T
 
 ## Project Rules
 
-- No direct commits to `main` after branch protection is enabled.
-- All work goes through feature branches and PRs.
-- Commit messages and PR titles must use Conventional Commits.
-- PR bodies must include release notes written for plugin users.
+- Direct commits to `main` are allowed for solo/agent work when appropriate; use pull requests when review or staging helps.
+- Commit messages should use Conventional Commits when `release_type: auto` should infer a stable version bump.
 - Do not manually edit versions unless explicitly instructed.
 - Do not use timestamp versions or CI build numbers as stable public versions.
 - Do not change release workflows without explaining the effect.
 - Do not publish to the official Dalamud repo.
 - Do not commit secrets.
 - Keep user-facing changelog text understandable for non-developers.
-- PR builds may only update testing/pre-release fields.
+- Manual testing builds may only update testing/pre-release fields.
 - Manual stable releases may update stable fields.
 - Keep `Plugin.cs` as the composition root: service injection, command registration, config/window wiring, and disposal only.
 - Put tweak behavior under `XelsTweaks/Tweaks/`.
@@ -54,12 +52,11 @@ On Linux, set `DALAMUD_HOME` to a directory containing Dalamud dev assemblies. T
 
 The active custom feed is `XelsPlugins/XelsDalamudRepo`. Keep this repository listed in that repo's `repos.txt`.
 
-`.github/workflows/validate.yml`, `.github/workflows/pr-preview.yml`, and `.github/workflows/release.yml` are thin wrappers around `XelsPlugins/XelsDalamud.Workflows`.
+`.github/workflows/validate.yml`, `.github/workflows/publish-testing.yml`, and `.github/workflows/release.yml` are thin wrappers around reusable automation in `XelsPlugins/XelsDalamudRepo`.
 
-PR previews use mutable `pr-<PR_NUMBER>` prereleases and may only update central feed testing fields:
+Testing builds are manually triggered, use the mutable `testing` prerelease, and may only update central feed testing fields:
 
 - `TestingAssemblyVersion`
-- `TestingChangelog`
 - `TestingDalamudApiLevel`
 - `DownloadLinkTesting`
 
