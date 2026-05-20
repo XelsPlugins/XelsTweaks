@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using XelsTweaks.Tweaks.Interface;
 using XelsTweaks.Tweaks.MenuControl;
+using XelsTweaks.Tweaks.Targeting;
 using XelsTweaks.Tweaks.Utility;
 
 namespace XelsTweaks.Tweaks;
@@ -129,6 +130,11 @@ internal sealed class TweakManager : IDisposable
         this.Register(new PartyListExamineTweak(
             this.services,
             this.config.GetOrCreateTweakState(PartyListExamineTweak.TweakId),
+            this.saveConfig));
+
+        this.Register(new RestoreFocusTargetAfterTransitionsTweak(
+            this.services,
+            this.config.GetOrCreateTweakState(RestoreFocusTargetAfterTransitionsTweak.TweakId),
             this.saveConfig));
     }
 
