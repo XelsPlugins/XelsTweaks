@@ -6,6 +6,14 @@ These instructions apply to the entire repository.
 
 XelsTweaks is a modular Dalamud tweak hub. Keep the plugin shell small and put feature behavior in individual tweak classes.
 
+## Agent Instruction Standards
+
+- Treat this file as the durable repository instruction source for coding agents.
+- Keep instructions concrete and verifiable. Prefer exact commands, paths, ownership boundaries, and review expectations over broad preferences.
+- Keep user-facing installation and usage details in `README.md`; keep build, release, automation, and agent workflow rules in `AGENTS.md`.
+- Do not add task-specific notes, transient plans, or duplicate large instruction blocks here.
+- Do not use alternate instruction filenames unless Codex has been explicitly configured to discover them.
+
 ## Build And Validation
 
 Use these commands from the repository root:
@@ -21,7 +29,6 @@ On Linux, set `DALAMUD_HOME` to a directory containing Dalamud dev assemblies. T
 ## Project Rules
 
 - Direct commits to `main` are allowed for solo/agent work when appropriate; use pull requests when review or staging helps.
-- Commit messages should use Conventional Commits when `release_type: auto` should infer a stable version bump.
 - Do not manually edit versions unless explicitly instructed.
 - Do not use timestamp versions or CI build numbers as stable public versions.
 - Do not change release workflows without explaining the effect.
@@ -65,4 +72,24 @@ Stable releases are manually triggered, use immutable `vX.Y.Z` tags, and may upd
 - `AssemblyVersion`
 - `DownloadLinkInstall`
 - `DownloadLinkUpdate`
-- stable changelog/release metadata
+
+Generated release notes belong on GitHub release and prerelease pages, not in `pluginmaster.json` changelog fields.
+
+## Commit Message Standards
+
+Use Conventional Commits for all agent-authored commits. The shared validation workflow checks non-merge commit subjects on pushes to `main`, and release automation validates the commit range before publishing.
+
+- Use `fix:` or `perf:` for patch-level user-facing changes.
+- Use `feat:` for minor user-facing additions.
+- Use `type!:` or a `BREAKING CHANGE:` footer for major changes.
+- Use `docs:`, `style:`, `refactor:`, `test:`, `build:`, `ci:`, or `chore:` for changes that should not create a user-facing stable bump unless breaking.
+- Do not prefix commit subjects with `[codex]`.
+- Keep the subject concise, imperative, and clear about the user impact.
+
+Examples:
+
+- `fix: keep command reference window open`
+- `feat: add armoire automation tweak`
+- `ci: migrate testing publish workflow`
+- `docs: clarify testing build installation`
+- `chore: update plugin metadata`
