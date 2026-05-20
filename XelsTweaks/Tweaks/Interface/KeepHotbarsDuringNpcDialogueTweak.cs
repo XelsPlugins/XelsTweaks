@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Threading;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Game.ClientState.Conditions;
@@ -14,6 +15,8 @@ internal sealed unsafe class KeepHotbarsDuringNpcDialogueTweak : TweakBase
 
     private const string ActionSettingPrefix = "action";
     private const string DialogueSettingPrefix = "dialogue";
+    private const int MaxNodeTreeDepth = 8;
+    private const int MaxSiblingNodes = 256;
     private static readonly TimeSpan SuppressionWindow = TimeSpan.FromMilliseconds(750);
     private static readonly ConditionFlag[] DialogueConditionFlags =
     [
@@ -55,9 +58,11 @@ internal sealed unsafe class KeepHotbarsDuringNpcDialogueTweak : TweakBase
         new("SelectOk", "OK prompts", true),
     ];
 
+    private readonly HashSet<string> actionAddonsVisibleBeforeDialogue = [];
     private DateTimeOffset suppressActionHideUntil = DateTimeOffset.MinValue;
     private bool restoreQueued;
     private bool listenersRegistered;
+    private bool actionVisibilitySnapshotActive;
 
     public KeepHotbarsDuringNpcDialogueTweak(DalamudServices services, TweakState state, Action saveConfig)
         : base(services, state, saveConfig)
@@ -133,6 +138,7 @@ internal sealed unsafe class KeepHotbarsDuringNpcDialogueTweak : TweakBase
         this.suppressActionHideUntil = DateTimeOffset.MinValue;
         this.restoreQueued = false;
         this.listenersRegistered = false;
+        this.ClearActionAddonVisibilitySnapshot();
     }
 
     private void OnDialogueAddonOpening(AddonEvent eventType, AddonArgs args)
@@ -159,7 +165,9 @@ internal sealed unsafe class KeepHotbarsDuringNpcDialogueTweak : TweakBase
 
     private void OnActionAddonPreHide(AddonEvent eventType, AddonArgs args)
     {
-        if (!this.IsActionAddonEnabled(args.AddonName) || !this.ShouldSuppressActionHide())
+        if (!this.IsActionAddonEnabled(args.AddonName)
+            || !this.ShouldSuppressActionHide()
+            || !this.ShouldRestoreActionAddon(args.AddonName))
         {
             return;
         }
@@ -170,7 +178,9 @@ internal sealed unsafe class KeepHotbarsDuringNpcDialogueTweak : TweakBase
 
     private void OnActionAddonPostHide(AddonEvent eventType, AddonArgs args)
     {
-        if (!this.IsActionAddonEnabled(args.AddonName) || !this.ShouldSuppressActionHide())
+        if (!this.IsActionAddonEnabled(args.AddonName)
+            || !this.ShouldSuppressActionHide()
+            || !this.ShouldRestoreActionAddon(args.AddonName))
         {
             return;
         }
@@ -187,11 +197,24 @@ internal sealed unsafe class KeepHotbarsDuringNpcDialogueTweak : TweakBase
         }
 
         this.suppressActionHideUntil = DateTimeOffset.MinValue;
-        return this.IsDialogueContextActive();
+        if (this.IsDialogueContextActive())
+        {
+            this.CaptureActionAddonVisibility();
+            return true;
+        }
+
+        this.ClearActionAddonVisibilitySnapshot();
+        return false;
     }
 
     private void StartSuppressionWindow()
     {
+        if (DateTimeOffset.UtcNow > this.suppressActionHideUntil && !this.IsDialogueContextActive())
+        {
+            this.ClearActionAddonVisibilitySnapshot();
+        }
+
+        this.CaptureActionAddonVisibility();
         this.suppressActionHideUntil = DateTimeOffset.UtcNow + SuppressionWindow;
     }
 
@@ -213,18 +236,59 @@ internal sealed unsafe class KeepHotbarsDuringNpcDialogueTweak : TweakBase
     private void RestoreActionAddons()
     {
         this.restoreQueued = false;
-        if (!this.IsEnabled || !this.ShouldSuppressActionHide())
+        if (!this.IsEnabled)
         {
+            return;
+        }
+
+        if (!this.IsDialogueContextActive())
+        {
+            if (DateTimeOffset.UtcNow > this.suppressActionHideUntil)
+            {
+                this.ClearActionAddonVisibilitySnapshot();
+            }
+
             return;
         }
 
         foreach (var option in ActionAddonOptions)
         {
-            if (this.IsOptionEnabled(option, ActionSettingPrefix))
+            if (this.IsOptionEnabled(option, ActionSettingPrefix) && this.ShouldRestoreActionAddon(option.AddonName))
             {
                 this.ShowActionAddon(option.AddonName);
             }
         }
+    }
+
+    private void CaptureActionAddonVisibility()
+    {
+        if (this.actionVisibilitySnapshotActive)
+        {
+            return;
+        }
+
+        this.actionAddonsVisibleBeforeDialogue.Clear();
+        foreach (var option in ActionAddonOptions)
+        {
+            if (this.IsOptionEnabled(option, ActionSettingPrefix) && this.IsActionAddonVisible(option.AddonName))
+            {
+                this.actionAddonsVisibleBeforeDialogue.Add(option.AddonName);
+            }
+        }
+
+        this.actionVisibilitySnapshotActive = true;
+    }
+
+    private void ClearActionAddonVisibilitySnapshot()
+    {
+        this.actionAddonsVisibleBeforeDialogue.Clear();
+        this.actionVisibilitySnapshotActive = false;
+    }
+
+    private bool ShouldRestoreActionAddon(string addonName)
+    {
+        return this.actionVisibilitySnapshotActive
+            && this.actionAddonsVisibleBeforeDialogue.Contains(addonName);
     }
 
     private void ShowActionAddon(string addonName)
@@ -246,15 +310,14 @@ internal sealed unsafe class KeepHotbarsDuringNpcDialogueTweak : TweakBase
 
     private bool IsDialogueContextActive()
     {
-        return this.IsAnyDialogueAddonVisible()
-            || (this.IsDialogueConditionActive() && this.IsAnyDialogueAddonLoadedWithValues());
+        return this.IsAnyDialogueAddonVisible();
     }
 
     private bool IsAnyDialogueAddonVisible()
     {
         foreach (var option in DialogueAddonOptions)
         {
-            if (this.IsOptionEnabled(option, DialogueSettingPrefix) && this.IsAddonVisible(option.AddonName))
+            if (this.IsOptionEnabled(option, DialogueSettingPrefix) && this.IsDialogueAddonVisible(option.AddonName))
             {
                 return true;
             }
@@ -263,20 +326,7 @@ internal sealed unsafe class KeepHotbarsDuringNpcDialogueTweak : TweakBase
         return false;
     }
 
-    private bool IsAnyDialogueAddonLoadedWithValues()
-    {
-        foreach (var option in DialogueAddonOptions)
-        {
-            if (this.IsOptionEnabled(option, DialogueSettingPrefix) && this.IsAddonLoadedWithValues(option.AddonName))
-            {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    private bool IsAddonVisible(string addonName)
+    private bool IsActionAddonVisible(string addonName)
     {
         var addon = this.Services.GameGui.GetAddonByName(addonName, 1);
         if (addon.IsNull || addon.Address == IntPtr.Zero)
@@ -288,7 +338,7 @@ internal sealed unsafe class KeepHotbarsDuringNpcDialogueTweak : TweakBase
         return addonPtr->IsVisible;
     }
 
-    private bool IsAddonLoadedWithValues(string addonName)
+    private bool IsDialogueAddonVisible(string addonName)
     {
         var addon = this.Services.GameGui.GetAddonByName(addonName, 1);
         if (addon.IsNull || addon.Address == IntPtr.Zero)
@@ -297,17 +347,30 @@ internal sealed unsafe class KeepHotbarsDuringNpcDialogueTweak : TweakBase
         }
 
         var addonPtr = (AtkUnitBase*)addon.Address;
-        return addonPtr->IsReady && addonPtr->AtkValuesCount > 0;
+        return addonPtr->IsVisible || HasVisibleNode(addonPtr->RootNode, 0);
     }
 
-    private bool IsDialogueConditionActive()
+    private static bool HasVisibleNode(AtkResNode* node, int depth)
     {
-        foreach (var flag in DialogueConditionFlags)
+        if (node == null || depth > MaxNodeTreeDepth)
         {
-            if (this.Services.Condition[flag])
+            return false;
+        }
+
+        var currentNode = node;
+        for (var i = 0; currentNode != null && i < MaxSiblingNodes; i++)
+        {
+            if (currentNode->IsVisible())
             {
                 return true;
             }
+
+            if (HasVisibleNode(currentNode->ChildNode, depth + 1))
+            {
+                return true;
+            }
+
+            currentNode = currentNode->NextSiblingNode;
         }
 
         return false;
