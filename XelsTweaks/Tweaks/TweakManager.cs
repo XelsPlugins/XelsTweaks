@@ -106,6 +106,11 @@ internal sealed class TweakManager : IDisposable
             this.config.GetOrCreateTweakState(KeepTryOnOpenTweak.TweakId),
             this.saveConfig));
 
+        this.Register(new KeepHotbarsDuringNpcDialogueTweak(
+            this.services,
+            this.config.GetOrCreateTweakState(KeepHotbarsDuringNpcDialogueTweak.TweakId),
+            this.saveConfig));
+
         this.Register(new TryOnCopyItemNameTweak(
             this.services,
             this.config.GetOrCreateTweakState(TryOnCopyItemNameTweak.TweakId),
