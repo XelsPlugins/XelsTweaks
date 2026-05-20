@@ -17,6 +17,7 @@ internal sealed unsafe class KeepHotbarsDuringNpcDialogueTweak : TweakBase
     private const string DialogueSettingPrefix = "dialogue";
     private const int MaxNodeTreeDepth = 8;
     private const int MaxSiblingNodes = 256;
+    private const int DialogueEndCleanupDelayTicks = 3;
     private static readonly TimeSpan SuppressionWindow = TimeSpan.FromMilliseconds(750);
     private static readonly ConditionFlag[] DialogueConditionFlags =
     [
@@ -60,8 +61,11 @@ internal sealed unsafe class KeepHotbarsDuringNpcDialogueTweak : TweakBase
     private static readonly IReadOnlyList<TweakOptionDefinition> CommandOptions = CreateCommandOptions();
 
     private readonly HashSet<string> actionAddonsVisibleBeforeDialogue = [];
+    private readonly HashSet<string> activeDialogueAddons = [];
+    private readonly HashSet<ConditionFlag> activeDialogueConditions = [];
     private DateTimeOffset suppressActionHideUntil = DateTimeOffset.MinValue;
     private bool restoreQueued;
+    private bool dialogueCleanupQueued;
     private bool listenersRegistered;
     private bool actionVisibilitySnapshotActive;
 
@@ -104,8 +108,11 @@ internal sealed unsafe class KeepHotbarsDuringNpcDialogueTweak : TweakBase
         {
             this.Services.AddonLifecycle.RegisterListener(AddonEvent.PreOpen, option.AddonName, this.OnDialogueAddonOpening);
             this.Services.AddonLifecycle.RegisterListener(AddonEvent.PreShow, option.AddonName, this.OnDialogueAddonOpening);
+            this.Services.AddonLifecycle.RegisterListener(AddonEvent.PostHide, option.AddonName, this.OnDialogueAddonClosed);
+            this.Services.AddonLifecycle.RegisterListener(AddonEvent.PostClose, option.AddonName, this.OnDialogueAddonClosed);
         }
 
+        this.RefreshActiveDialogueConditions();
         this.Services.Condition.ConditionChange += this.OnConditionChanged;
         this.listenersRegistered = true;
 
@@ -127,6 +134,8 @@ internal sealed unsafe class KeepHotbarsDuringNpcDialogueTweak : TweakBase
 
         foreach (var option in DialogueAddonOptions)
         {
+            this.Services.AddonLifecycle.UnregisterListener(AddonEvent.PostClose, option.AddonName, this.OnDialogueAddonClosed);
+            this.Services.AddonLifecycle.UnregisterListener(AddonEvent.PostHide, option.AddonName, this.OnDialogueAddonClosed);
             this.Services.AddonLifecycle.UnregisterListener(AddonEvent.PreShow, option.AddonName, this.OnDialogueAddonOpening);
             this.Services.AddonLifecycle.UnregisterListener(AddonEvent.PreOpen, option.AddonName, this.OnDialogueAddonOpening);
         }
@@ -139,7 +148,10 @@ internal sealed unsafe class KeepHotbarsDuringNpcDialogueTweak : TweakBase
 
         this.suppressActionHideUntil = DateTimeOffset.MinValue;
         this.restoreQueued = false;
+        this.dialogueCleanupQueued = false;
         this.listenersRegistered = false;
+        this.activeDialogueAddons.Clear();
+        this.activeDialogueConditions.Clear();
         this.ClearActionAddonVisibilitySnapshot();
     }
 
@@ -150,18 +162,35 @@ internal sealed unsafe class KeepHotbarsDuringNpcDialogueTweak : TweakBase
             return;
         }
 
-        this.StartSuppressionWindow();
+        var startsNewDialogueContext = !this.IsObservedDialogueContextActive();
+        this.activeDialogueAddons.Add(args.AddonName);
+        this.StartSuppressionWindow(startsNewDialogueContext);
         this.QueueActionAddonRestore();
+    }
+
+    private void OnDialogueAddonClosed(AddonEvent eventType, AddonArgs args)
+    {
+        this.activeDialogueAddons.Remove(args.AddonName);
+        this.QueueDialogueContextCleanup();
     }
 
     private void OnConditionChanged(ConditionFlag flag, bool value)
     {
-        if (!value || !IsDialogueConditionFlag(flag))
+        if (!IsDialogueConditionFlag(flag))
         {
             return;
         }
 
-        this.StartSuppressionWindow();
+        if (!value)
+        {
+            this.activeDialogueConditions.Remove(flag);
+            this.QueueDialogueContextCleanup();
+            return;
+        }
+
+        var startsNewDialogueContext = !this.IsObservedDialogueContextActive();
+        this.activeDialogueConditions.Add(flag);
+        this.StartSuppressionWindow(startsNewDialogueContext);
         this.QueueActionAddonRestore();
     }
 
@@ -209,9 +238,10 @@ internal sealed unsafe class KeepHotbarsDuringNpcDialogueTweak : TweakBase
         return false;
     }
 
-    private void StartSuppressionWindow()
+    private void StartSuppressionWindow(bool startsNewDialogueContext = false)
     {
-        if (DateTimeOffset.UtcNow > this.suppressActionHideUntil && !this.IsDialogueContextActive())
+        if (startsNewDialogueContext
+            || (DateTimeOffset.UtcNow > this.suppressActionHideUntil && !this.IsObservedDialogueContextActive()))
         {
             this.ClearActionAddonVisibilitySnapshot();
         }
@@ -233,6 +263,39 @@ internal sealed unsafe class KeepHotbarsDuringNpcDialogueTweak : TweakBase
             default,
             1,
             CancellationToken.None);
+    }
+
+    private void QueueDialogueContextCleanup()
+    {
+        if (this.dialogueCleanupQueued)
+        {
+            return;
+        }
+
+        this.dialogueCleanupQueued = true;
+        this.Services.Framework.RunOnTick(
+            this.CleanupDialogueContext,
+            default,
+            DialogueEndCleanupDelayTicks,
+            CancellationToken.None);
+    }
+
+    private void CleanupDialogueContext()
+    {
+        this.dialogueCleanupQueued = false;
+        if (!this.IsEnabled)
+        {
+            return;
+        }
+
+        this.RefreshActiveDialogueConditions();
+        if (this.IsObservedDialogueContextActive())
+        {
+            return;
+        }
+
+        this.suppressActionHideUntil = DateTimeOffset.MinValue;
+        this.ClearActionAddonVisibilitySnapshot();
     }
 
     private void RestoreActionAddons()
@@ -312,7 +375,39 @@ internal sealed unsafe class KeepHotbarsDuringNpcDialogueTweak : TweakBase
 
     private bool IsDialogueContextActive()
     {
-        return this.IsAnyDialogueAddonVisible();
+        return this.IsObservedDialogueContextActive() || this.IsAnyDialogueAddonVisible();
+    }
+
+    private bool IsObservedDialogueContextActive()
+    {
+        return this.IsAnyTrackedDialogueAddonActive()
+            || this.activeDialogueConditions.Count > 0
+            || this.IsAnyDialogueAddonUnitVisible();
+    }
+
+    private bool IsAnyTrackedDialogueAddonActive()
+    {
+        foreach (var addonName in this.activeDialogueAddons)
+        {
+            if (this.IsDialogueAddonEnabled(addonName))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private void RefreshActiveDialogueConditions()
+    {
+        this.activeDialogueConditions.Clear();
+        foreach (var flag in DialogueConditionFlags)
+        {
+            if (this.Services.Condition[flag])
+            {
+                this.activeDialogueConditions.Add(flag);
+            }
+        }
     }
 
     private bool IsAnyDialogueAddonVisible()
@@ -320,6 +415,19 @@ internal sealed unsafe class KeepHotbarsDuringNpcDialogueTweak : TweakBase
         foreach (var option in DialogueAddonOptions)
         {
             if (this.IsOptionEnabled(option, DialogueSettingPrefix) && this.IsDialogueAddonVisible(option.AddonName))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private bool IsAnyDialogueAddonUnitVisible()
+    {
+        foreach (var option in DialogueAddonOptions)
+        {
+            if (this.IsOptionEnabled(option, DialogueSettingPrefix) && this.IsDialogueAddonUnitVisible(option.AddonName))
             {
                 return true;
             }
@@ -350,6 +458,18 @@ internal sealed unsafe class KeepHotbarsDuringNpcDialogueTweak : TweakBase
 
         var addonPtr = (AtkUnitBase*)addon.Address;
         return addonPtr->IsVisible || HasVisibleNode(addonPtr->RootNode, 0);
+    }
+
+    private bool IsDialogueAddonUnitVisible(string addonName)
+    {
+        var addon = this.Services.GameGui.GetAddonByName(addonName, 1);
+        if (addon.IsNull || addon.Address == IntPtr.Zero)
+        {
+            return false;
+        }
+
+        var addonPtr = (AtkUnitBase*)addon.Address;
+        return addonPtr->IsVisible;
     }
 
     private static bool HasVisibleNode(AtkResNode* node, int depth)
