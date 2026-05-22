@@ -19,8 +19,8 @@ internal sealed class KeepTryOnOpenTweak : TweakBase
     }
 
     public override string Id => TweakId;
-    public override string Name => "Keep Try On Window Open";
-    public override string Description => "Keeps the Try On window open after closing an inspected player's character window.";
+    public override string Name => "Keep Fitting Room Open";
+    public override string Description => "Keeps the Fitting Room open after closing an inspected player's character window.";
     public override TweakCategory Category => TweakCategory.Interface;
 
     protected override void OnEnable()
@@ -57,6 +57,6 @@ internal sealed class KeepTryOnOpenTweak : TweakBase
 
         args.PreventOriginal();
         this.suppressTryonHideUntil = DateTimeOffset.MinValue;
-        this.Services.Log.Debug("Suppressed Try On hide requested while Character Inspect was closing.");
+        this.Services.Log.Debug("Suppressed Fitting Room hide requested while Character Inspect was closing.");
     }
 }

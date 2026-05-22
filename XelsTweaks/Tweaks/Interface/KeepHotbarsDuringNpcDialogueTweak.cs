@@ -75,7 +75,7 @@ internal sealed unsafe class KeepHotbarsDuringNpcDialogueTweak : TweakBase
     }
 
     public override string Id => TweakId;
-    public override string Name => "Keep Hotbars During NPC Dialogue";
+    public override string Name => "Keep Hotbars Open";
     public override string Description => "Keeps selected action bars available while NPC dialogue is open.";
     public override TweakCategory Category => TweakCategory.Interface;
     public override bool DrawConfigWhenDisabled => true;
