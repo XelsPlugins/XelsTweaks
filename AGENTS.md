@@ -26,6 +26,16 @@ dotnet format XelsTweaks/XelsTweaks.csproj --verify-no-changes
 
 On Linux, set `DALAMUD_HOME` to a directory containing Dalamud dev assemblies. The project falls back to `$HOME/.xlcore/dalamud/Hooks/dev` when `DALAMUD_HOME` is not set.
 
+## XelsDevBridge Runtime Inspection
+
+Use the `xels-tweaks-devbridge` Codex skill, or the locally configured equivalent, when live runtime state would reduce guessing for tweak work. Good candidates include addon node inspection, AtkValue layouts, target/object state, condition flags, glamour dresser behavior, UI callback experiments, and in-game validation.
+
+- Treat DevBridge as optional, evolving, and machine-specific. Do not hardcode local checkout paths, helper script paths, bridge URLs, token locations, or connection file paths in this repository's documentation.
+- Start each investigation with the skill's discovery workflow and prefer advertised capabilities, routes, schemas, and action metadata over endpoint assumptions.
+- Use read-only queries first. Mutation actions such as command execution, targeting, button clicks, or callback firing require a specific low-risk purpose, the smallest useful payload, and a final-response note describing the action used.
+- If DevBridge is unavailable, continue from static code when reasonable and state the limitation. If runtime state is essential, propose the smallest missing bridge capability.
+- After editing or rebuilding a local DevBridge instance, reload the running game plugin before trusting live node traversal or action metadata.
+
 ## Project Rules
 
 - Direct commits to `main` are allowed for solo/agent work when appropriate; use pull requests when review or staging helps.
