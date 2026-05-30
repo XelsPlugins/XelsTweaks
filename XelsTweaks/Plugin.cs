@@ -33,6 +33,7 @@ public sealed class Plugin : IDalamudPlugin
     [PluginService] private static IAgentLifecycle AgentLifecycle { get; set; } = null!;
     [PluginService] private static IAddonLifecycle AddonLifecycle { get; set; } = null!;
     [PluginService] private static IGameInventory GameInventory { get; set; } = null!;
+    [PluginService] private static IKeyState KeyState { get; set; } = null!;
     [PluginService] private static ISigScanner SigScanner { get; set; } = null!;
 
     private readonly Configuration config;
@@ -63,6 +64,7 @@ public sealed class Plugin : IDalamudPlugin
             AgentLifecycle,
             AddonLifecycle,
             GameInventory,
+            KeyState,
             SigScanner);
 
         this.config = PluginInterface.GetPluginConfig() as Configuration ?? new Configuration();
@@ -184,6 +186,12 @@ public sealed class Plugin : IDalamudPlugin
         }
 
         this.tweakManager.SetEnabled(tweak, enabled);
+        if (enabled && !tweak.IsEnabled && tweak.LastError != null)
+        {
+            this.Print($"{tweak.Name} was not enabled: {tweak.LastError}");
+            return;
+        }
+
         this.Print($"{tweak.Name} is {(tweak.IsEnabled ? "on" : "off")}.");
     }
 
@@ -195,6 +203,12 @@ public sealed class Plugin : IDalamudPlugin
         }
 
         this.tweakManager.SetEnabled(tweak, !tweak.IsEnabled);
+        if (!tweak.IsEnabled && tweak.LastError != null)
+        {
+            this.Print($"{tweak.Name} was not enabled: {tweak.LastError}");
+            return;
+        }
+
         this.Print($"{tweak.Name} is {(tweak.IsEnabled ? "on" : "off")}.");
     }
 

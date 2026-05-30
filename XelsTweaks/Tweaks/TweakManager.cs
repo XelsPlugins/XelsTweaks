@@ -122,6 +122,11 @@ internal sealed class TweakManager : IDisposable
             this.config.GetOrCreateTweakState(TryOnCopyItemNameTweak.TweakId),
             this.saveConfig));
 
+        this.Register(new QuickInventoryDeleteTweak(
+            this.services,
+            this.config.GetOrCreateTweakState(QuickInventoryDeleteTweak.TweakId),
+            this.saveConfig));
+
         this.Register(new GlamourOutfitCompactorTweak(
             this.services,
             this.config.GetOrCreateTweakState(GlamourOutfitCompactorTweak.TweakId),

@@ -38,6 +38,10 @@ internal sealed class ConfigWindow : Window, IDisposable
     private readonly ISharedImmediateTexture? logoTexture;
     private string searchText = string.Empty;
     private TweakBase? selectedTweak;
+    private TweakBase? pendingAgreementTweak;
+    private IRequiresEnableAgreement? pendingAgreement;
+    private bool pendingAgreementAccepted;
+    private bool pendingAgreementOpenRequested;
 
     public ConfigWindow(TweakManager tweakManager, ITextureProvider textureProvider, string logoPath)
         : base("XelsTweaks Configuration###XelsTweaksConfig")
@@ -76,6 +80,8 @@ internal sealed class ConfigWindow : Window, IDisposable
 
         ImGui.EndChild();
         ImGui.PopStyleVar();
+
+        this.DrawEnableAgreementPopup();
 
         ImGui.SameLine(0f, 0f);
 
@@ -181,7 +187,14 @@ internal sealed class ConfigWindow : Window, IDisposable
 
             if (ImGui.Checkbox("##enabled", ref enabled))
             {
-                this.tweakManager.SetEnabled(tweak, enabled);
+                if (enabled && tweak is IRequiresEnableAgreement agreement && agreement.RequiresEnableAgreement)
+                {
+                    this.OpenEnableAgreement(tweak, agreement);
+                }
+                else
+                {
+                    this.tweakManager.SetEnabled(tweak, enabled);
+                }
             }
 
             if (!requirementMet)
@@ -297,6 +310,87 @@ internal sealed class ConfigWindow : Window, IDisposable
             tweak.DrawConfig();
             ImGui.Unindent(TweakConfigIndent);
         }
+    }
+
+    private void OpenEnableAgreement(TweakBase tweak, IRequiresEnableAgreement agreement)
+    {
+        this.selectedTweak = tweak;
+        this.pendingAgreementTweak = tweak;
+        this.pendingAgreement = agreement;
+        this.pendingAgreementAccepted = false;
+        this.pendingAgreementOpenRequested = true;
+    }
+
+    private void DrawEnableAgreementPopup()
+    {
+        if (this.pendingAgreementTweak == null || this.pendingAgreement == null)
+        {
+            return;
+        }
+
+        if (!this.tweakManager.Tweaks.Contains(this.pendingAgreementTweak))
+        {
+            this.ClearEnableAgreement();
+            return;
+        }
+
+        var title = this.pendingAgreement.EnableAgreementTitle;
+        if (this.pendingAgreementOpenRequested)
+        {
+            ImGui.OpenPopup(title);
+            this.pendingAgreementOpenRequested = false;
+        }
+
+        ImGui.SetNextWindowSize(new Vector2(560f, 0f), ImGuiCond.Always);
+        if (!ImGui.BeginPopupModal(title, ImGuiWindowFlags.AlwaysAutoResize))
+        {
+            return;
+        }
+
+        ImGui.TextColored(WarningColor, "Read before enabling");
+        ImGui.Spacing();
+        ImGui.PushTextWrapPos(ImGui.GetCursorPosX() + 520f);
+        ImGui.TextUnformatted(this.pendingAgreement.EnableAgreementText);
+        ImGui.PopTextWrapPos();
+        ImGui.Spacing();
+        ImGui.Checkbox(this.pendingAgreement.EnableAgreementCheckboxLabel, ref this.pendingAgreementAccepted);
+        ImGui.Spacing();
+
+        var acceptDisabled = !this.pendingAgreementAccepted;
+        if (acceptDisabled)
+        {
+            ImGui.BeginDisabled();
+        }
+
+        if (ImGui.Button("Accept and Enable", new Vector2(160f, 0f)))
+        {
+            this.pendingAgreement.AcceptEnableAgreement();
+            this.tweakManager.SetEnabled(this.pendingAgreementTweak, true);
+            this.ClearEnableAgreement();
+            ImGui.CloseCurrentPopup();
+        }
+
+        if (acceptDisabled)
+        {
+            ImGui.EndDisabled();
+        }
+
+        ImGui.SameLine();
+        if (ImGui.Button("Cancel", new Vector2(100f, 0f)))
+        {
+            this.ClearEnableAgreement();
+            ImGui.CloseCurrentPopup();
+        }
+
+        ImGui.EndPopup();
+    }
+
+    private void ClearEnableAgreement()
+    {
+        this.pendingAgreementTweak = null;
+        this.pendingAgreement = null;
+        this.pendingAgreementAccepted = false;
+        this.pendingAgreementOpenRequested = false;
     }
 
     private void DrawTweakHeader(TweakBase tweak)

@@ -22,6 +22,7 @@ internal sealed class DalamudServices(
     IAgentLifecycle agentLifecycle,
     IAddonLifecycle addonLifecycle,
     IGameInventory gameInventory,
+    IKeyState keyState,
     ISigScanner sigScanner)
 {
     public IDalamudPluginInterface PluginInterface { get; } = pluginInterface;
@@ -41,5 +42,6 @@ internal sealed class DalamudServices(
     public IAgentLifecycle AgentLifecycle { get; } = agentLifecycle;
     public IAddonLifecycle AddonLifecycle { get; } = addonLifecycle;
     public IGameInventory GameInventory { get; } = gameInventory;
+    public IKeyState KeyState { get; } = keyState;
     public ISigScanner SigScanner { get; } = sigScanner;
 }
